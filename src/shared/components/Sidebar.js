@@ -347,17 +347,6 @@ export default function Sidebar({ onClose }) {
           </div>
         </nav>
 
-        <div className="border-t border-border-subtle px-6 py-3 text-center">
-          <a
-            href="https://github.com/mhiqrambg/9router-mibp-version"
-            target="_blank"
-            rel="noreferrer"
-            className="text-[10px] text-text-muted/60 hover:text-text-muted transition-colors"
-          >
-            MIBP Edition · GitHub
-          </a>
-        </div>
-
       </aside>
 
       {/* Remote Promo Modal */}

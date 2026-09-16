@@ -314,16 +314,6 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
           </div>
         )}
         <HeaderSearch />
-        <a
-          href="https://github.com/mhiqrambg/9router-mibp-version"
-          target="_blank"
-          rel="noreferrer"
-          className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-sm font-medium"
-          aria-label="MIBP Edition"
-        >
-          <span className="material-symbols-outlined text-[18px]">code</span>
-          <span className="hidden sm:inline">MIBP Edition</span>
-        </a>
         <ThemeToggle />
         <HeaderLanguage />
         <HeaderMenu onLogout={handleLogout} />
