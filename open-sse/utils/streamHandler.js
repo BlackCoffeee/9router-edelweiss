@@ -95,6 +95,9 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
  * activity), not here — output of the transform stream may be silent
  * for long periods while raw bytes still flow (e.g. Kiro EventStream
  * binary frames buffering, Claude reasoning streams).
+ *
+ * @param {function} [onAbortTerminal] - Receives a human-readable abort
+ * message and returns terminal SSE bytes to emit downstream.
  */
 export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null) {
   const reader = transformStream.readable.getReader();
@@ -191,6 +194,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
  */
 export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS) {
   let stallTimer = null;
+  let abortMessage = "upstream connection lost";
   const clearStall = () => {
     if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
   };
@@ -198,6 +202,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     clearStall();
     stallTimer = setTimeout(() => {
       stallTimer = null;
+      abortMessage = "stream stall timeout";
       streamController.handleError?.(new Error("stream stall timeout"));
       streamController.abort?.();
     }, stallTimeoutMs);
@@ -233,7 +238,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   return createDisconnectAwareStream(
     { readable: transformedBody, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
     wrappedController,
-    onAbortTerminal
+    onAbortTerminal ? () => onAbortTerminal(abortMessage) : null
   );
 }
 
