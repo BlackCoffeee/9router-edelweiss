@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Pinned by digest so a base-image refresh cannot silently bump npm and break
 # `npm ci` against the committed lockfile (see v1.0.9 npm ci EUSAGE failure).
+# DO NOT unpin. This image ships npm 10.9.8 — the lockfile MUST be regenerated
+# with npm 10 (`npx -y npm@10.9.8 install --package-lock-only`), never npm 11+.
+# See AGENTS.md §1 and scripts/verify-lockfile-npm10.mjs.
 ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 FROM ${NODE_IMAGE} AS base
 WORKDIR /app
@@ -10,6 +13,10 @@ FROM base AS builder
 RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
 
 COPY package.json package-lock.json ./
+# Fail fast with an actionable message if the lockfile was regenerated with
+# npm 11+ (drops the top-level @emnapi entries npm 10 requires). Without this,
+# `npm ci` still fails but with a cryptic "Missing: @emnapi/..." EUSAGE error.
+RUN node -e "const l=require('./package-lock.json');const p=l.packages||{};const miss=['node_modules/@emnapi/core','node_modules/@emnapi/runtime'].filter(k=>!p[k]);if(miss.length){console.error('LOCKFILE NOT npm-10-COMPATIBLE — missing: '+miss.join(', '));console.error('Regenerate with: npx -y npm@10.9.8 install --package-lock-only');console.error('See AGENTS.md §1.');process.exit(1)}"
 RUN --mount=type=cache,target=/root/.npm \
   npm ci
 

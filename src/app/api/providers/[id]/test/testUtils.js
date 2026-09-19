@@ -93,10 +93,13 @@ const OAUTH_TEST_CONFIG = {
     authPrefix: "Bearer ",
   },
   "codebuddy-cn": { tokenExists: true },
-  // CodeBuddy Intl access tokens are Keycloak JWTs (iss .../auth/realms/copilot);
-  // probe the realm's userinfo endpoint so a revoked/expired token is caught.
-  // Derive the realm URL from the token's `iss` claim, falling back to the
-  // known copilot realm. 200 = valid, 401 = invalid/revoked.
+  // GUARD — DO NOT REMOVE. See AGENTS.md §4. Without this entry, Test Connection
+  // returns "Provider test not supported". codebuddy-intl access tokens are
+  // Keycloak JWTs (iss .../auth/realms/copilot); probe the realm's userinfo
+  // endpoint so a revoked/expired token is caught. Derive the realm URL from the
+  // token's `iss` claim, falling back to the known copilot realm.
+  // 200 = valid, 401 = invalid/revoked.
+  // Covered by tests/unit/codebuddy-intl-connection.test.js.
   "codebuddy-intl": {
     buildUrl: (token) => {
       const iss = decodeJwtPayload(token)?.iss;

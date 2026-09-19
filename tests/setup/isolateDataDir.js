@@ -4,6 +4,9 @@
 // they append test rows ("zed-live-*@example.com", "guard-*@example.com",
 // "Account N") straight into the live DB.
 //
+// GUARD — DO NOT DELETE this file or remove it from vitest.config.js setupFiles.
+// See AGENTS.md §2. Covered by tests/unit/test-data-dir-isolation.test.js.
+//
 // DATA_DIR must be set before src/lib/dataDir.js is imported (it reads the env
 // at module-eval time), which is exactly what a vitest setupFile guarantees.
 //

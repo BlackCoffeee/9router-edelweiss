@@ -1,5 +1,7 @@
 // Provider list for the Usage page.
 //
+// GUARD — DO NOT DELETE the `!p.hidden` filter below. See AGENTS.md §3.
+//
 // Two sources, deduped by provider id:
 //   1. Active LLM connections (one entry per provider).
 //   2. noAuth free providers that need no connection (e.g. opencode).
@@ -7,6 +9,7 @@
 // Hidden providers are excluded — the Providers page filters `hidden`, so a
 // hidden noAuth provider (devin-cli, mimo-free) must not leak into Usage with
 // zero connections and zero traffic.
+// Covered by tests/unit/usage-provider-list.test.js.
 export function buildUsageProviderList({
   connections = [],
   freeProviders = {},

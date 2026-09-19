@@ -68,9 +68,10 @@ const codebuddyIntl = {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
     expiresIn: tokens.expires_in || 86400,
-    // The CodeBuddy access token is a Keycloak JWT carrying email/name claims;
-    // surface them so a fresh OAuth login is named by identity (and deduped on
-    // re-login) instead of falling back to "Account N".
+    // GUARD — DO NOT REMOVE. See AGENTS.md §4. The CodeBuddy access token is a
+    // Keycloak JWT carrying email/name claims; surface them so a fresh OAuth
+    // login is named by identity (and deduped on re-login) instead of falling
+    // back to "Account N". Covered by tests/unit/codebuddy-intl-connection.test.js.
     email: extractEmailFromAccessToken(tokens.access_token) || null,
     displayName: extractDisplayNameFromAccessToken(tokens.access_token) || null,
     providerSpecificData: {},
