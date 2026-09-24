@@ -53,9 +53,15 @@ describe("cline auth header shape", () => {
     expect(buildClineHeaders("sk_abc", {}, { isApiKey: true }).Authorization).toBe("Bearer sk_abc");
   });
 
-  it("prefixes OAuth tokens with workos:", () => {
-    expect(buildClineHeaders("tok123").Authorization).toBe("Bearer workos:tok123");
-    expect(buildClineHeaders("workos:tok123").Authorization).toBe("Bearer workos:tok123");
+  it("prefixes WorkOS JWT OAuth tokens with workos:", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig";
+    expect(buildClineHeaders(jwt).Authorization).toBe(`Bearer workos:${jwt}`);
+    expect(buildClineHeaders(`workos:${jwt}`).Authorization).toBe(`Bearer workos:${jwt}`);
+  });
+
+  it("does not workos:-prefix opaque tokens (API keys, clp_…)", () => {
+    expect(buildClineHeaders("tok123").Authorization).toBe("Bearer tok123");
+    expect(buildClineHeaders("clp_abc123").Authorization).toBe("Bearer clp_abc123");
   });
 
   it("sends Cline product identity headers (free-model gate)", () => {

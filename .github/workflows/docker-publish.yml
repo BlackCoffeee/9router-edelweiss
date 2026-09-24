@@ -24,6 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Guard: the committed package-lock.json must be npm-10-compatible (the
+      # Docker image ships npm 10.9.8). Fails fast with a fix hint instead of a
+      # cryptic `npm ci` EUSAGE error. See AGENTS.md §1.
+      - name: Verify lockfile is npm-10-compatible
+        run: node scripts/verify-lockfile-npm10.mjs
+
       - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
 
       - name: Log in to GHCR

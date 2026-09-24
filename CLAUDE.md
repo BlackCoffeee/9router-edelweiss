@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> ⚠️ **MIBP fork — read [`AGENTS.md`](AGENTS.md) first.** It lists fixes that are
+> easy to silently delete or reintroduce (npm-10 lockfile rule, test DB
+> isolation, hidden-provider filtering, codebuddy-intl behavior, fork-only
+> features that must survive upstream syncs). Do not remove anything listed
+> there without explicit confirmation.
+
 ## What this is
 
 9Router (`9router-app`) — a local AI routing gateway + Next.js dashboard. It exposes one OpenAI-compatible endpoint (`/v1/*`) and routes traffic across 40+ upstream providers with format translation, model-combo fallback, multi-account fallback, OAuth/API-key credential management, token refresh, quota/usage tracking, and optional cloud sync.

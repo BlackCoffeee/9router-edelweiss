@@ -2,7 +2,7 @@
 import "open-sse/index.js";
 
 import { generatePKCE } from "../utils/pkce.js";
-import { extractCodexAccountInfo, fetchKiroProfileArn } from "../providerHelpers.js";
+import { extractCodexAccountInfo, fetchKiroProfileArn, extractEmailFromAccessToken, extractDisplayNameFromAccessToken } from "../providerHelpers.js";
 
 import claude from "./claude.js";
 import codex from "./codex.js";
@@ -114,6 +114,11 @@ export async function generateAuthData(providerName, redirectUri, meta) {
     flowType: provider.flowType,
     fixedPort: provider.fixedPort,
     callbackPath: provider.callbackPath || "/callback",
+    // Zed: surface the system_id embedded in the sign-in URL so the frontend
+    // can thread it through register-session → exchange → stored connection
+    // (exchangeTokens re-runs prepareConfig, which would otherwise mint a
+    // different one). Absent for every other provider — purely additive.
+    ...(config.systemId ? { systemId: config.systemId } : {}),
   };
 }
 
@@ -204,6 +209,43 @@ export async function pollForToken(providerName, deviceCode, codeVerifier, extra
 
 // Run-once guard across the process lifetime
 let codexBackfillDone = false;
+let codebuddyIntlBackfillDone = false;
+
+// Backfill email + displayName for existing CodeBuddy Intl OAuth connections
+// created before mapTokens surfaced identity (they show up as "Account N").
+// The access token is a Keycloak JWT carrying email/name claims.
+export async function backfillCodeBuddyIntlIdentity() {
+  if (codebuddyIntlBackfillDone) return;
+  codebuddyIntlBackfillDone = true;
+  try {
+    const { getProviderConnections, updateProviderConnection } = await import("@/lib/localDb");
+    const connections = await getProviderConnections();
+    const targets = connections.filter((c) => {
+      if (c.provider !== "codebuddy-intl" || c.authType !== "oauth" || !c.accessToken) return false;
+      // Also re-heal rows whose name is still the generic "Account N" placeholder.
+      const genericName = typeof c.name === "string" && /^Account \d+$/.test(c.name.trim());
+      return !c.email || !c.displayName || genericName;
+    });
+    for (const conn of targets) {
+      const patch = {};
+      const email = conn.email || extractEmailFromAccessToken(conn.accessToken);
+      const displayName = conn.displayName || extractDisplayNameFromAccessToken(conn.accessToken);
+      if (!conn.email && email) patch.email = email;
+      if (!conn.displayName && displayName) patch.displayName = displayName;
+      // Rename the generic placeholder to the identity (email preferred, matching
+      // deriveConnectionName's behavior for new logins).
+      if (/^Account \d+$/.test((conn.name || "").trim()) && (email || displayName)) {
+        patch.name = email || displayName;
+      }
+      if (Object.keys(patch).length) {
+        await updateProviderConnection(conn.id, patch);
+      }
+    }
+  } catch (err) {
+    codebuddyIntlBackfillDone = false;
+    console.log("backfillCodeBuddyIntlIdentity failed:", err?.message || err);
+  }
+}
 
 // Backfill email + chatgpt account info for existing codex OAuth connections missing them
 export async function backfillCodexEmails() {
