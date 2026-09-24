@@ -67,8 +67,11 @@ import p64 from "./nebius.js";
 import p65 from "./nvidia.js";
 import p66 from "./ollama-local.js";
 import p67 from "./ollama.js";
+import p123 from "./ollama-search.js";
+import p124 from "./qoder-cn.js";
 import p68 from "./openai.js";
 import p69 from "./opencode-go.js";
+import p68z from "./opencode-zen.js";
 import p70 from "./opencode.js";
 import p71 from "./openrouter.js";
 import p72 from "./perplexity-web.js";
@@ -191,8 +194,11 @@ export default [
   p64,
   p65,
   p66,
+  p123,
+  p124,
   p67,
   p68,
+  p68z,
   p69,
   p70,
   p71,
