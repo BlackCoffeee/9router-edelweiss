@@ -83,6 +83,27 @@ describe("OpenCode Free Session ID Format", () => {
     expect(translateSessionId(valid)).toBe(valid);
     expect(translateSessionId(`  ${valid}  `)).toBe(valid);
   });
+
+  // #4780: upstream Zen decodes the 12-hex prefix as OpenCode CLI's
+  // Identifier.descending — ~(BigInt(Date.now()) * 4096n + counter). A SHA-256
+  // digest prefix decodes to a bogus timestamp and is rejected with
+  // 403 FreeTierError for every non-OpenCode client.
+  it("mints a genuine inverted-timestamp prefix, not a digest prefix (fixes #4780)", () => {
+    const spy = vi.spyOn(Date, "now").mockReturnValue(1791893280481);
+    try {
+      const raw = "claude:non-opencode-uuid-12345";
+      const translated = translateSessionId(raw, "claude");
+      expect(translated).toMatch(OPENCODE_SESSION_RE);
+      expect(translated).toHaveLength(30);
+      // First id minted in a millisecond => counter=1 => low byte 0xfe. A random
+      // SHA-256 prefix would almost never satisfy this.
+      expect(translated.slice(4, 16).endsWith("fe")).toBe(true);
+      // Stability: the same (tool, session) reuses one upstream session id.
+      expect(translateSessionId(raw, "claude")).toBe(translated);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("OpenCode Free Executor Session Resolution", () => {
@@ -344,5 +365,22 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
   it("declares forceStream on the opencode transport so chatCore serves SSE upstream", async () => {
     const { PROVIDERS } = await import("../../open-sse/config/providers.js");
     expect(PROVIDERS.opencode?.forceStream).toBe(true);
+  });
+});
+
+describe("OpenCode Zen translated session IDs (#4780)", () => {
+  it("mints a genuine inverted-timestamp prefix for non-OpenCode clients", async () => {
+    const zen = await import("../../open-sse/executors/opencode-zen.js");
+    const spy = vi.spyOn(Date, "now").mockReturnValue(1791893281000);
+    try {
+      const raw = "claude:uuid-zen-abc";
+      const id = zen.translateSessionId(raw, "claude");
+      expect(id).toMatch(zen.OPENCODE_SESSION_RE);
+      expect(id).toHaveLength(30);
+      expect(id.slice(4, 16).endsWith("fe")).toBe(true);
+      expect(zen.translateSessionId(raw, "claude")).toBe(id);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
