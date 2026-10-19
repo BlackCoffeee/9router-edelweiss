@@ -39,12 +39,17 @@ function base64Url(buf) {
 /**
  * Wrap fetch with an AbortController-based timeout. Without this, a stalled
  * upstream socket hangs on Node's default keepalive timeout (minutes) and
- * abandoned polls accumulate hung sockets.
+ * abandoned polls accumulate hung sockets. When proxyPoolId is set, the
+ * request goes through that proxy pool instead (Docker egress IP limits).
  */
-async function fetchWithTimeout(url, init = {}) {
+async function fetchWithTimeout(url, init = {}, proxyPoolId = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort("timeout"), FETCH_TIMEOUT_MS);
   try {
+    if (proxyPoolId) {
+      const { fetchOAuthWithPool } = await import("../oauthProxy.js");
+      return await fetchOAuthWithPool(url, { ...init, signal: controller.signal }, proxyPoolId);
+    }
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
@@ -52,6 +57,27 @@ async function fetchWithTimeout(url, init = {}) {
 }
 
 export class QoderService {
+  /**
+   * Region-aware device flow. Pass an oauth config block (registry oauth →
+   * PROVIDER_OAUTH) to hit the CN site; without one, the intl endpoints are
+   * used. Only the hostnames differ between regions — the flow is identical.
+   */
+  constructor(config = {}) {
+    this.config = config;
+  }
+
+  loginUrl() {
+    return this.config.loginUrl || QODER_LOGIN_URL;
+  }
+
+  deviceTokenUrl() {
+    return this.config.deviceTokenUrl || QODER_DEVICE_TOKEN_URL;
+  }
+
+  userInfoUrl() {
+    return this.config.userInfoUrl || QODER_USERINFO_URL;
+  }
+
   /**
    * Generate a PKCE verifier + S256 challenge pair.
    * Uses 32 random bytes (matches qodercli/Veria).
@@ -79,7 +105,7 @@ export class QoderService {
     });
 
     return {
-      verificationUriComplete: `${QODER_LOGIN_URL}?${params.toString()}`,
+      verificationUriComplete: `${this.loginUrl()}?${params.toString()}`,
       codeVerifier: verifier,
       nonce,
       machineId,
@@ -94,11 +120,11 @@ export class QoderService {
    *
    * Upstream returns 202/404 while waiting; 200 with a JSON body when done.
    */
-  async pollDeviceToken({ nonce, codeVerifier }) {
+  async pollDeviceToken({ nonce, codeVerifier, proxyPoolId = null }) {
     if (!nonce || !codeVerifier) {
       throw new Error("pollDeviceToken: missing nonce or code verifier");
     }
-    const url = `${QODER_DEVICE_TOKEN_URL}?nonce=${encodeURIComponent(nonce)}&verifier=${encodeURIComponent(codeVerifier)}&challenge_method=S256`;
+    const url = `${this.deviceTokenUrl()}?nonce=${encodeURIComponent(nonce)}&verifier=${encodeURIComponent(codeVerifier)}&challenge_method=S256`;
 
     const response = await fetchWithTimeout(url, {
       method: "GET",
@@ -106,7 +132,7 @@ export class QoderService {
         Accept: "application/json",
         "User-Agent": "Go-http-client/2.0",
       },
-    });
+    }, proxyPoolId);
 
     // Pending — server has registered the device code but the user hasn't
     // finished the browser flow yet. Both 202 and 404 mean "keep polling".
@@ -153,16 +179,16 @@ export class QoderService {
    * Fetch profile info for the freshly-issued token. Best-effort — failures
    * shouldn't block login; returning empty strings is fine.
    */
-  async fetchUserInfo(accessToken) {
+  async fetchUserInfo(accessToken, proxyPoolId = null) {
     try {
-      const response = await fetchWithTimeout(QODER_USERINFO_URL, {
+      const response = await fetchWithTimeout(this.userInfoUrl(), {
         method: "GET",
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
           "User-Agent": "Go-http-client/2.0",
         },
-      });
+      }, proxyPoolId);
       if (!response.ok) return { name: "", email: "" };
       const body = await response.json();
       return {

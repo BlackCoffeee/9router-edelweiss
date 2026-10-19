@@ -1,52 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-vi.mock("@/lib/usageDb.js", () => ({
-  appendRequestLog: vi.fn(async () => {}),
-  saveRequestDetail: vi.fn(async () => {}),
-  saveRequestUsage: vi.fn(async () => {})
-}));
-
-const { unwrapDataEnvelope } = await import("../../open-sse/handlers/chatCore/nonStreamingHandler.js");
 const { buildClineHeaders } = await import("../../open-sse/shared/clineAuth.js");
 
-// Cline gateway wraps non-streaming Chat Completions in {data, success}.
-// handleNonStreamingResponse calls unwrapDataEnvelope unconditionally (it runs
-// before the needsTranslation gate, which openai→openai never passes).
-const ENVELOPED = {
-  data: {
-    id: "gen-123",
-    object: "chat.completion",
-    created: 1789056634,
-    model: "deepseek/deepseek-v4-flash-0731",
-    choices: [{ index: 0, message: { role: "assistant", content: "Hi there!" }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 9, completion_tokens: 29, total_tokens: 38 },
-  },
-  success: true,
-};
-
-describe("cline {data} envelope unwrap", () => {
-  it("unwraps choices/usage to top level", () => {
-    const out = unwrapDataEnvelope(structuredClone(ENVELOPED));
-    expect(out.choices?.[0]?.message?.content).toBe("Hi there!");
-    expect(out.usage?.prompt_tokens).toBe(9);
-  });
-
-  it("leaves plain OpenAI bodies untouched", () => {
-    const out = unwrapDataEnvelope(structuredClone(ENVELOPED.data));
-    expect(out.choices?.[0]?.message?.content).toBe("Hi there!");
-  });
-
-  it("prefers top-level choices when both exist", () => {
-    const body = { ...structuredClone(ENVELOPED), choices: [{ index: 0, message: { role: "assistant", content: "top" }, finish_reason: "stop" }] };
-    const out = unwrapDataEnvelope(body);
-    expect(out.choices?.[0]?.message?.content).toBe("top");
-  });
-
-  it("ignores non-envelope bodies", () => {
-    expect(unwrapDataEnvelope(null)).toBe(null);
-    expect(unwrapDataEnvelope({ error: "x" })).toEqual({ error: "x" });
-  });
-});
+// Envelope-unwrap behavior for non-streaming responses is covered by the
+// upstream, opt-in mechanism instead: see unwrapClineEnvelope()
+// (open-sse/shared/clineEnvelope.js) and tests/unit/cline-free-models-envelope.test.js.
+// A generic unconditional unwrap was removed during the v0.5.86 sync because it
+// rewrote non-opted-in providers' bodies, breaking the opt-in contract that
+// test pins ("leaves an enveloped body untouched for a provider that did not
+// opt in"). This file retains the auth-header coverage (buildClineHeaders is
+// the only path that sets the Cline free-model gate headers).
 
 describe("cline auth header shape", () => {
   it("sends API keys as plain Bearer", () => {
