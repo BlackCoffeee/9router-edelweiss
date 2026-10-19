@@ -67,8 +67,6 @@ import p64 from "./nebius.js";
 import p65 from "./nvidia.js";
 import p66 from "./ollama-local.js";
 import p67 from "./ollama.js";
-import p123 from "./ollama-search.js";
-import p124 from "./qoder-cn.js";
 import p68 from "./openai.js";
 import p69 from "./opencode-go.js";
 import p68z from "./opencode-zen.js";
@@ -79,6 +77,7 @@ import p73 from "./perplexity.js";
 import p74 from "./perplexity-agent.js";
 import p75 from "./playht.js";
 import p76 from "./qoder.js";
+import p124 from "./qoder-cn.js";
 import p77 from "./recraft.js";
 import p78 from "./runwayml.js";
 import p79 from "./sdwebui.js";
@@ -125,6 +124,18 @@ import p119 from "./fish-audio.js";
 import p120 from "./alitp-intl.js";
 import p121 from "./xquik.js";
 import p122 from "./ollama-search.js";
+import p125 from "./tokenharbor.js";
+import p126 from "./dahl.js";
+import p127 from "./atria.js";
+import p129 from "./agnes.js";
+import p130 from "./bai.js";
+import p131 from "./tinyfish.js";
+import p132 from "./v1m.js";
+import p133 from "./muse.js";
+import p134 from "./minimax-code.js";
+import p135 from "./minimax-code-global.js";
+import p136 from "./bedrock.js";
+import p137 from "./bedrock-xai.js";
 
 export default [
   p0,
@@ -194,8 +205,6 @@ export default [
   p64,
   p65,
   p66,
-  p123,
-  p124,
   p67,
   p68,
   p68z,
@@ -207,6 +216,7 @@ export default [
   p74,
   p75,
   p76,
+  p124,
   p77,
   p78,
   p79,
@@ -253,4 +263,16 @@ export default [
   p120,
   p121,
   p122,
+  p125,
+  p126,
+  p127,
+  p129,
+  p130,
+  p131,
+  p132,
+  p133,
+  p134,
+  p135,
+  p136,
+  p137,
 ];

@@ -4,6 +4,7 @@ import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
+import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { unwrapClineEnvelope } from "../../shared/clineEnvelope.js";
@@ -138,21 +139,6 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
       total_tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
     },
   };
-}
-
-/**
- * Unwrap gateway envelopes around an OpenAI Chat Completions body.
- * Some OpenAI-compatible gateways wrap the body in a `data` envelope
- * (Cline: {data, success}) — without this, choices/usage don't resolve at
- * top level downstream and surface as "no completion choices".
- * Generic guard, no provider hardcode: only fires when the OpenAI body is
- * nested under `data`.
- */
-export function unwrapDataEnvelope(responseBody) {
-  if (responseBody && !responseBody.choices && responseBody.data?.choices) {
-    return responseBody.data;
-  }
-  return responseBody;
 }
 
 /**
@@ -327,9 +313,6 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   responseBody = unwrapClineEnvelope(responseBody, provider);
 
   reqLogger.logProviderResponse(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
-  // Unwrap AFTER logging (raw envelope stays in the log for forensics) but
-  // BEFORE usage extraction/translation so choices/usage resolve downstream.
-  responseBody = unwrapDataEnvelope(responseBody);
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -417,7 +400,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   return {
     success: true,
     response: new Response(JSON.stringify(restoreToolNames(translatedResponse, toolNameMap)), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", ...upstreamResponseHeaders(providerResponse.headers) }
     })
   };
 }

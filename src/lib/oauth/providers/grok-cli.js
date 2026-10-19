@@ -1,11 +1,13 @@
+import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
 import { GROK_CLI_CONFIG } from "../constants/oauth.js";
 import { decodeXaiIdTokenEmail, extractEmailFromAccessToken } from "../providerHelpers.js";
+import { fetchOAuthWithPool, oauthProxyPoolIdFrom } from "../oauthProxy.js";
 
 // Grok CLI / Grok Build — device code flow to auth.x.ai, inference on cli-chat-proxy.grok.com
 const grokCli = {
   config: GROK_CLI_CONFIG,
   flowType: "device_code",
-  requestDeviceCode: async (config) => {
+  requestDeviceCode: async (config, _challenge, options = {}) => {
     const body = new URLSearchParams({
       client_id: config.clientId,
       scope: config.scope,
@@ -13,15 +15,15 @@ const grokCli = {
     // Official CLI sends referrer=grok-build
     if (config.referrer) body.set("referrer", config.referrer);
 
-    const response = await fetch(config.deviceCodeUrl, {
+    const response = await fetchOAuthWithPool(config.deviceCodeUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
-        "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+        "User-Agent": GROK_CLI_PAGER_USER_AGENT,
       },
       body,
-    });
+    }, oauthProxyPoolIdFrom(options));
 
     if (!response.ok) {
       const error = await response.text();
@@ -30,20 +32,20 @@ const grokCli = {
 
     return await response.json();
   },
-  pollToken: async (config, deviceCode) => {
-    const response = await fetch(config.tokenUrl, {
+  pollToken: async (config, deviceCode, _verifier, _extra, options = {}) => {
+    const response = await fetchOAuthWithPool(config.tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
-        "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+        "User-Agent": GROK_CLI_PAGER_USER_AGENT,
       },
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: deviceCode,
         client_id: config.clientId,
       }),
-    });
+    }, oauthProxyPoolIdFrom(options));
 
     let data;
     try {
@@ -62,18 +64,18 @@ const grokCli = {
       data,
     };
   },
-  postExchange: async (tokens) => {
+  postExchange: async (tokens, options = {}) => {
     // Best-effort user profile from cli-chat-proxy (non-fatal)
     try {
-      const res = await fetch("https://cli-chat-proxy.grok.com/v1/user", {
+      const res = await fetchOAuthWithPool("https://cli-chat-proxy.grok.com/v1/user", {
         headers: {
           Authorization: `Bearer ${tokens.access_token}`,
           Accept: "application/json",
-          "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+          "User-Agent": GROK_CLI_PAGER_USER_AGENT,
           "x-xai-token-auth": "xai-grok-cli",
-          "x-grok-client-version": "0.2.93",
+          "x-grok-client-version": GROK_CLI_VERSION,
         },
-      });
+      }, oauthProxyPoolIdFrom(options));
       if (res.ok) return { user: await res.json() };
     } catch {
       /* ignore */

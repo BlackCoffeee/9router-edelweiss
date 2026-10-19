@@ -1,4 +1,4 @@
-import { Inter } from "next/font/google";
+import localFont from "next/font/local";
 import { GoogleAnalytics } from "@next/third-parties/google";
 import "material-symbols/outlined.css";
 import "./globals.css";
@@ -11,9 +11,21 @@ import { RuntimeI18nProvider } from "@/i18n/RuntimeI18nProvider";
 // Hook console immediately at module load time (server-side only, runs once)
 initConsoleLogCapture();
 
-const inter = Inter({
-  subsets: ["latin"],
+// Self-hosted Inter (variable wght 100-900, latin) via next/font/local.
+// Do NOT switch back to next/font/google: the build/dev machine cannot reach
+// fonts.googleapis.com (proxy/fake-IP DNS), which makes Next spam
+// "Failed to download Inter ... Using a fallback font instead" on every
+// compile. Source: @fontsource-variable/inter, file vendored as-is.
+const inter = localFont({
+  src: [
+    {
+      path: "./fonts/inter-latin-wght-normal.woff2",
+      weight: "100 900",
+      style: "normal",
+    },
+  ],
   variable: "--font-inter",
+  display: "swap",
 });
 
 export const metadata = {
