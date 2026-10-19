@@ -204,6 +204,17 @@ const PERIODS = [
   { value: "all", label: "All" },
 ];
 
+const TABLE_VIEW_MODE_KEY = "usageStatsTableViewMode";
+const VALID_TABLE_VIEW_MODES = new Set(["costs", "tokens"]);
+
+function readStoredTableViewMode() {
+  try {
+    const stored = window.localStorage.getItem(TABLE_VIEW_MODE_KEY);
+    if (stored && VALID_TABLE_VIEW_MODES.has(stored)) return stored;
+  } catch { /* ignore */ }
+  return "costs";
+}
+
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -216,12 +227,25 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [fetching, setFetching] = useState(false);
   const [tableView, setTableView] = useState("model");
   const [viewMode, setViewMode] = useState("costs");
+  const [hasHydratedViewMode, setHasHydratedViewMode] = useState(false);
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
+
+  useEffect(() => {
+    setViewMode(readStoredTableViewMode());
+    setHasHydratedViewMode(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedViewMode) return;
+    try {
+      window.localStorage.setItem(TABLE_VIEW_MODE_KEY, viewMode);
+    } catch { /* ignore */ }
+  }, [viewMode, hasHydratedViewMode]);
 
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
@@ -479,7 +503,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       )}
 
       {/* Token / Cost chart - sync period */}
-      {loading ? spinner : <UsageChart period={period} />}
+      {loading ? spinner : <UsageChart period={period} providers={providers} />}
 
       {/* Provider and model breakdown charts */}
       {!loading && (stats.byProvider || stats.byModel) && (
