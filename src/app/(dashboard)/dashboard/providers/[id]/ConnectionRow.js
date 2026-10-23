@@ -284,19 +284,55 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
           </div>
-           {modelAssignmentOptions && onModelAssignmentChange && (
-             <select
-               value={connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel || ""}
-              onChange={(e) => onModelAssignmentChange(e.target.value)}
-              disabled={!strictModelAssignment}
-               className="mt-2 max-w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-text-main"
-               title="Model assignment"
-             >
-               <option value="">Unassigned</option>
-               {modelAssignmentOptions.map((model) => (
-                <option key={model.id} value={model.id}>{model.name || model.id}</option>
-              ))}
-            </select>
+          {modelAssignmentOptions && onModelAssignmentChange && (
+            <div className="mt-2.5">
+              <div
+                className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 transition-all sm:w-auto sm:min-w-[280px] sm:max-w-md ${
+                  !strictModelAssignment
+                    ? "border-dashed border-border/70 bg-black/[0.02] opacity-60 dark:bg-white/[0.02]"
+                    : (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel)
+                    ? "border-primary/40 bg-primary/[0.04] shadow-xs"
+                    : "border-border bg-surface-2/60 hover:bg-surface-2 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20"
+                }`}
+              >
+                <span
+                  className={`material-symbols-outlined shrink-0 text-[16px] ${
+                    (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel) && strictModelAssignment
+                      ? "text-primary"
+                      : "text-text-muted"
+                  }`}
+                >
+                  psychology
+                </span>
+                <select
+                  value={connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel || ""}
+                  onChange={(e) => onModelAssignmentChange(e.target.value)}
+                  disabled={!strictModelAssignment}
+                  title={
+                    !strictModelAssignment
+                      ? "Aktifkan 'Strict Model Assignment' di atas untuk mengunci model ke akun ini"
+                      : "Model assignment"
+                  }
+                  className={`min-w-0 flex-1 cursor-pointer appearance-none bg-transparent text-xs font-medium focus:outline-none disabled:cursor-not-allowed ${
+                    (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel) && strictModelAssignment
+                      ? "font-semibold text-primary"
+                      : "text-text-main"
+                  }`}
+                >
+                  <option value="" className="bg-surface text-text-muted">
+                    Unassigned (All models)
+                  </option>
+                  {modelAssignmentOptions.map((model) => (
+                    <option key={model.id} value={model.id} className="bg-surface text-text-main">
+                      {model.name || model.id}
+                    </option>
+                  ))}
+                </select>
+                <span className="material-symbols-outlined pointer-events-none shrink-0 text-[16px] text-text-muted">
+                  expand_more
+                </span>
+              </div>
+            </div>
           )}
           {hasAnyProxy && (
             <div className="mt-1 flex items-center gap-2 flex-wrap">

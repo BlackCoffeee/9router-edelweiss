@@ -47,6 +47,7 @@ const USAGE_SUPPORTED = new Set(USAGE_SUPPORTED_PROVIDERS);
 const AUTO_REFRESH_ENABLED_KEY = "usageChartQuotaAutoRefresh";
 const AUTO_REFRESH_SECONDS_KEY = "usageChartQuotaAutoRefreshSeconds";
 const VIEW_MODE_STORAGE_KEY = "usageChartViewMode";
+const QUOTA_PROVIDER_STORAGE_KEY = "usageChartQuotaProvider";
 const DEFAULT_AUTO_REFRESH_SECONDS = 60;
 const MIN_AUTO_REFRESH_SECONDS = 10;
 const MAX_AUTO_REFRESH_SECONDS = 3600;
@@ -58,6 +59,15 @@ function readStoredViewMode() {
     if (stored && VALID_VIEW_MODES.has(stored)) return stored;
   } catch { /* ignore */ }
   return "tokens";
+}
+
+function readStoredQuotaProvider() {
+  if (typeof window === "undefined") return "all";
+  try {
+    const stored = window.localStorage.getItem(QUOTA_PROVIDER_STORAGE_KEY);
+    if (stored) return stored;
+  } catch { /* ignore */ }
+  return "all";
 }
 
 function clampRefreshSeconds(value) {
@@ -77,7 +87,7 @@ export default function UsageChart({ period = "7d", providers = [] }) {
   const [loading, setLoading] = useState(true);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [viewMode, setViewMode] = useState("tokens");
-  const [quotaProvider, setQuotaProvider] = useState("all");
+  const [quotaProvider, setQuotaProvider] = useState(readStoredQuotaProvider);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [refreshSeconds, setRefreshSeconds] = useState(DEFAULT_AUTO_REFRESH_SECONDS);
   const [secondsInput, setSecondsInput] = useState(String(DEFAULT_AUTO_REFRESH_SECONDS));
@@ -190,7 +200,7 @@ export default function UsageChart({ period = "7d", providers = [] }) {
 
   useEffect(() => {
     if (viewMode !== "quota") return;
-    if (quotaProvider !== "all" && !quotaProviderOptions.includes(quotaProvider)) {
+    if (quotaProvider !== "all" && quotaProviderOptions.length > 0 && !quotaProviderOptions.includes(quotaProvider)) {
       setQuotaProvider("all");
       return;
     }
@@ -227,6 +237,12 @@ export default function UsageChart({ period = "7d", providers = [] }) {
       window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode);
     } catch { /* ignore */ }
   }, [viewMode, hasHydratedViewMode]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(QUOTA_PROVIDER_STORAGE_KEY, quotaProvider);
+    } catch { /* ignore */ }
+  }, [quotaProvider]);
 
   useEffect(() => {
     if (!hasHydratedAutoRefresh) return;
