@@ -28,6 +28,7 @@ export default function APIPageClient({ machineId }) {
   const [confirmState, setConfirmState] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
+  const [combosOnly, setCombosOnly] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
   const [hasPassword, setHasPassword] = useState(true);
  const [tunnelDashboardAccess, setTunnelDashboardAccess] = useState(false);
@@ -202,6 +203,7 @@ export default function APIPageClient({ machineId }) {
       ]);
       if (settingsData) {
         setRequireApiKey(settingsData.requireApiKey || false);
+        setCombosOnly(settingsData.combosOnly === true);
         setRequireLogin(settingsData.requireLogin !== false);
         setHasPassword(settingsData.hasPassword || false);
         setTunnelDashboardAccess(settingsData.tunnelDashboardAccess || false);
@@ -243,6 +245,15 @@ export default function APIPageClient({ machineId }) {
       if (updated) setRequireApiKey(value);
     } catch (error) {
       console.log("Error updating requireApiKey:", error);
+    }
+  };
+
+  const handleCombosOnly = async (value) => {
+    try {
+      const updated = await useSettingsStore.getState().patchSettings({ combosOnly: value });
+      if (updated) setCombosOnly(value);
+    } catch (error) {
+      console.log("Error updating combosOnly:", error);
     }
   };
 
@@ -1006,6 +1017,19 @@ export default function APIPageClient({ machineId }) {
           </div>
         )}
 
+        <div className="flex items-center justify-between pb-4 mb-4 border-b border-border">
+          <div>
+            <p className="font-medium">Combos only</p>
+            <p className="text-sm text-text-muted">
+              Expose only combos in /v1/models and reject direct model calls
+            </p>
+          </div>
+          <Toggle
+            checked={combosOnly}
+            onChange={() => handleCombosOnly(!combosOnly)}
+          />
+        </div>
+
         {keys.length === 0 ? (
           <div className="text-center py-12">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 text-primary mb-4">
@@ -1148,7 +1172,7 @@ export default function APIPageClient({ machineId }) {
               Save this key now!
             </p>
             <p className="text-sm text-yellow-700 dark:text-yellow-300">
-              This is the only time you will see this key. Store it securely.
+              Store this key securely. You can view or copy it later from the API Keys list.
             </p>
           </div>
           <div className="flex gap-2">

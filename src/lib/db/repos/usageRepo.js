@@ -5,9 +5,10 @@ import { getMeta, setMeta } from "../helpers/metaStore.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
-  if (key.length <= 12) return key.charAt(0) + "***";
+  const trimmed = key.trim();
+  if (trimmed.length <= 12) return trimmed.charAt(0) + "***";
   // Keep the tail: keys sharing a machine-id prefix (team keys) must not collide.
-  return key.slice(0, 8) + "***" + key.slice(-4);
+  return trimmed.slice(0, 8) + "***" + trimmed.slice(-4);
 }
 
 const PENDING_TIMEOUT_MS = 60 * 1000;
@@ -367,7 +368,9 @@ export async function getUsageStats(period = "all") {
   let allApiKeys = [];
   try { allApiKeys = await getApiKeys(); } catch {}
   const apiKeyMap = {};
-  for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
+  for (const k of allApiKeys) {
+    if (k.key) apiKeyMap[k.key.trim()] = { name: k.name, id: k.id, createdAt: k.createdAt };
+  }
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
   const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
@@ -430,7 +433,7 @@ export async function getUsageStats(period = "all") {
     stats.last10Minutes.push(bucketMap[ts]);
   }
   const recent10 = db.all(
-    `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ? AND timestamp <= ?`,
+    `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ? AND timestamp <= ? AND ${NOT_FAILED}`,
     [tenMinutesAgo.toISOString(), now.toISOString()]
   );
   for (const r of recent10) {
@@ -505,10 +508,10 @@ export async function getUsageStats(period = "all") {
         const rawModel = ak.rawModel || "";
         const provider = ak.provider || "";
         const providerDisplayName = providerNodeNameMap[provider] || provider;
-        const apiKeyVal = ak.apiKey;
+        const apiKeyVal = ak.apiKey ? ak.apiKey.trim() : null;
         const keyInfo = apiKeyVal ? apiKeyMap[apiKeyVal] : null;
-        const keyName = keyInfo?.name || (apiKeyVal ? apiKeyVal.slice(0, 8) + "..." : "Local (No API Key)");
         const apiKeyMasked = maskApiKey(apiKeyVal);
+        const keyName = keyInfo?.name || (apiKeyVal ? (apiKeyMasked || apiKeyVal.slice(0, 8) + "...") : "Local (No API Key)");
         const apiKeyKey = apiKeyMasked || "local-no-key";
         if (!stats.byApiKey[akKey]) {
           stats.byApiKey[akKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, apiKeyMasked, keyName, apiKeyKey, lastUsed: dateKey };
@@ -548,7 +551,7 @@ export async function getUsageStats(period = "all") {
       Date.now() - OVERLAY_WINDOW_MS
     );
     const histRows = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE timestamp >= ? AND ${NOT_FAILED}`,
       [new Date(overlayCutoff).toISOString()]
     );
     for (const e of histRows) {
@@ -582,14 +585,14 @@ export async function getUsageStats(period = "all") {
       cutoff = new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
     }
     const filtered = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ? AND ${NOT_FAILED}`,
       [cutoff]
     );
 
     for (const r of filtered) {
       const tokens = parseJson(r.tokens, {}) || {};
-      const promptTokens = tokens.prompt_tokens || 0;
-      const completionTokens = tokens.completion_tokens || 0;
+      const promptTokens = tokens.prompt_tokens || tokens.input_tokens || r.promptTokens || 0;
+      const completionTokens = tokens.completion_tokens || tokens.output_tokens || r.completionTokens || 0;
       const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
@@ -632,9 +635,10 @@ export async function getUsageStats(period = "all") {
       }
 
       if (r.apiKey && typeof r.apiKey === "string") {
-        const keyInfo = apiKeyMap[r.apiKey];
-        const keyName = keyInfo?.name || r.apiKey.slice(0, 8) + "...";
-        const apiKeyMasked = maskApiKey(r.apiKey);
+        const apiKeyVal = r.apiKey.trim();
+        const keyInfo = apiKeyMap[apiKeyVal];
+        const apiKeyMasked = maskApiKey(apiKeyVal);
+        const keyName = keyInfo?.name || apiKeyMasked || r.apiKey.slice(0, 8) + "...";
         // Key by the FULL api key (same as the daily rollup + lastUsed overlay)
         // — masking here collided all keys sharing a prefix into one bucket.
         const akKey = `${r.apiKey}|${r.model}|${r.provider || "unknown"}`;
@@ -683,7 +687,7 @@ export async function getChartData(period = "7d") {
     const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0, requests: 0 }));
 
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ? AND ${NOT_FAILED}`,
       [new Date(startTime).toISOString()]
     );
     for (const r of rows) {
@@ -707,7 +711,7 @@ export async function getChartData(period = "7d") {
     const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0, requests: 0 }));
 
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ? AND ${NOT_FAILED}`,
       [new Date(startTime).toISOString()]
     );
     for (const r of rows) {
@@ -775,14 +779,59 @@ function formatLogDate(date = new Date()) {
   return `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-// No-op: request log is now derived from usageHistory table on read.
-export async function appendRequestLog() {}
+// Request log is derived from usageHistory on read. Success rows are written by
+// saveRequestUsage (they carry tokens), but a failed request never reaches it —
+// saveUsageStats() bails when both token counts are 0 — so failures used to be
+// invisible in the dashboard entirely. Record terminal failures here as
+// zero-token rows.
+//
+// Deliberately a no-op for PENDING / "200 OK": those are progress markers, not
+// outcomes. Persisting them would double every successful request (saveRequestUsage
+// writes the real row) and leave PENDING orphans behind on crashes.
+const FAILED_STATUS_RE = /^FAILED\b/i;
+
+export async function appendRequestLog(entry = {}) {
+  try {
+    const status = String(entry.status || "");
+    if (!FAILED_STATUS_RE.test(status)) return;
+
+    const db = await getAdapter();
+    const timestamp = new Date().toISOString();
+    const tokens = entry.tokens || { prompt_tokens: 0, completion_tokens: 0 };
+
+    db.run(
+      `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        timestamp,
+        entry.provider || null,
+        entry.model || null,
+        entry.connectionId || null,
+        entry.apiKey || null,
+        entry.endpoint || null,
+        tokens.prompt_tokens || tokens.input_tokens || 0,
+        tokens.completion_tokens || tokens.output_tokens || 0,
+        0,
+        status,
+        stringifyJson(tokens),
+        // Only the failure reason is kept — never the prompt or the response body.
+        stringifyJson({ error: entry.error ? String(entry.error).slice(0, 500) : undefined }),
+      ]
+    );
+  } catch (e) {
+    // Logging must never break a request.
+    console.error("[usageRepo] appendRequestLog failed:", e.message);
+  }
+}
+
+// Failed requests are logged for diagnosis, not for accounting: they consume no
+// tokens and must not inflate request counts, charts or cost totals.
+const NOT_FAILED = `COALESCE(status, '') NOT LIKE 'FAILED%'`;
 
 export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();
     const rows = db.all(
-      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`,
+      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens, meta FROM usageHistory ORDER BY id DESC LIMIT ?`,
       [limit],
     );
     if (!rows.length) return [];
@@ -802,7 +851,11 @@ export async function getRecentLogs(limit = 200) {
       const tk = r.tokens ? parseJson(r.tokens, {}) : {};
       const sent = r.promptTokens ?? tk.prompt_tokens ?? "-";
       const received = r.completionTokens ?? tk.completion_tokens ?? "-";
-      return `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"}`;
+      const line = `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"}`;
+      // Trailing 8th field: failure reason, only when one was recorded. Consumers
+      // that split on " | " and require 7 parts keep working unchanged.
+      const reason = r.meta ? parseJson(r.meta, {})?.error : null;
+      return reason ? `${line} | ${String(reason).replace(/\s+/g, " ").slice(0, 300)}` : line;
     });
   } catch (e) {
     console.error("[usageRepo] getRecentLogs failed:", e.message);

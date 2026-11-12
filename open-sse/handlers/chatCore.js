@@ -24,15 +24,17 @@ import { dedupeTools } from "../utils/toolDeduper.js";
 import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
+import { injectCustomPrompt } from "../rtk/customPrompt.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
-import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
+import { stripUnsupportedModalities, hasMediaBlocks } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { markPoolUnfit, clearPoolUnfit } from "../services/proxyPoolFitness.js";
+import { laneRejectsMedia, markLaneRejectsMedia, textOnlyCaps } from "../services/mediaLaneSupport.js";
 
 // Pool-scoped failure retry: when an executor tags an error as belonging to a
 // proxy pool (region gate, dead proxy, …), re-resolve the proxy config
@@ -66,7 +68,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, resolveProxyConfig, providerOverrides }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, resolveProxyConfig, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -116,7 +118,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
   const stripList = getModelStrip(alias, model);
-  const upstreamModel = getModelUpstreamId(alias, model);
 
   // Inject provider-level thinking config override (only if client hasn't set)
   // on/off → extended type (body.thinking), none/low/medium/high → effort type (body.reasoning_effort)
@@ -131,6 +132,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       body = { ...body, reasoning_effort: mode };
     }
   }
+
+  const upstreamModel = getModelUpstreamId(alias, model, body);
 
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
@@ -186,7 +189,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Auto-strip media blocks the model can't read (vision/audio/pdf) before translation.
   if (!passthrough) {
-    const caps = getCapabilitiesForModel(provider, model);
+    const modelCaps = getCapabilitiesForModel(provider, model);
+    // A lane that already 400'd on a media-carrying request is text-only,
+    // whatever the model supports elsewhere: strip up front instead of paying
+    // for the failed round trip on every request.
+    const laneTextOnly = laneRejectsMedia(provider, connectionId, model);
+    const caps = laneTextOnly ? textOnlyCaps(modelCaps) : modelCaps;
+    if (laneTextOnly) log?.debug?.("MODALITY", `lane ${provider}/${model} rejects media — stripping up front`);
     if (stripUnsupportedModalities(body, sourceFormat, caps)) {
       log?.debug?.("MODALITY", `stripped unsupported media for ${provider}/${model}`);
     }
@@ -293,7 +302,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (headroomLine) {
     log?.info?.("HEADROOM", `${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
     if (isHeadroomPhantomSavings(headroomStats, headroomDiagnostics)) {
-      log?.warn?.("HEADROOM", `reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
+      log?.warn?.("HEADROOM", `reported token delta, but messages and outbound JSON shrank <5% | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
     }
   } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
 
@@ -312,6 +321,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) {
     injectPonytail(translatedBody, finalFormat, ponytailLevel);
     xf.push(`PONYTAIL:${ponytailLevel}`);
+  }
+
+  // Custom prompt: user-authored instruction, independent of the savers above
+  if (customPromptEnabled && injectCustomPrompt(translatedBody, finalFormat, customPrompt)) {
+    xf.push(`CUSTOMPROMPT:${customPrompt.trim().length}c`);
   }
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
@@ -368,18 +382,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const error = new Error(`Freebuff has no healthy proxy pool for ${model}; all assigned pools are cooling down after limited-IP errors.`);
     error.status = 503;
     error.poolScoped = { poolId: null, scope: proxyScope, reason: "no_fit_pool" };
-    trackPendingRequest(model, provider, connectionId, false, true);
-    return createErrorResult(503, error.message);
-  }
-
-  if (
-    provider === "freebuff" &&
-    !proxyOptions.proxyPoolId &&
-    !proxyOptions.vercelRelayUrl &&
-    !(proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl)
-  ) {
-    const error = new Error(`Freebuff requires a configured proxy pool for ${model}; direct egress is disabled to prevent limited-IP rate limits.`);
-    error.status = 503;
     trackPendingRequest(model, provider, connectionId, false, true);
     return createErrorResult(503, error.message);
   }
@@ -466,8 +468,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
-  try {
-    const result = await executeWithPoolFallback();
+  const applyResult = (result) => {
     providerResponse = result.response;
     providerUrl = result.url;
     providerHeaders = result.headers;
@@ -478,9 +479,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       toolNameMap = new Map([...(toolNameMap || []), ...renamedToolNames]);
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+  };
+  try {
+    applyResult(await executeWithPoolFallback());
   } catch (error) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
+    const thrownStatus = error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY;
+    appendRequestLog({
+      model, provider, connectionId, apiKey, endpoint: clientRawRequest?.endpoint,
+      status: `FAILED ${thrownStatus}`,
+      error: error.message || String(error),
+    }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
@@ -503,6 +512,24 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     // Carry the executor's own status (429/409 quota gates) when it threw one;
     // fall back to 502 for generic throws.
     return createErrorResult(error?.status || HTTP_STATUS.BAD_GATEWAY, errMsg, error?.resetsAtMs || undefined);
+  }
+
+  // Media-tolerant retry: a lane can reject the whole request when it carries a
+  // media part (probed 2026-11-11: an image_url part — base64 data URI or https
+  // URL — answers 400 upstream_invalid_request on the runcrate DeepSeek flex
+  // lanes and on a custom OpenAI-compatible node fronting nutaraline) even
+  // though the model id is vision-capable behind other gateways. Capabilities
+  // describe the model, not the lane, so learn the lane from the wire: strip the
+  // media out of the outbound body, retry once, and remember it for next time.
+  if (!providerResponse.ok && providerResponse.status === HTTP_STATUS.BAD_REQUEST) {
+    const mediaFormat = passthrough ? sourceFormat : providerResponseFormat;
+    if (hasMediaBlocks(translatedBody, mediaFormat)) {
+      stripUnsupportedModalities(translatedBody, mediaFormat, textOnlyCaps({}));
+      log?.warn?.("MODALITY", `${provider}/${model} rejected a media-carrying request — retrying without media parts`);
+      parsedNonOk = null; // the retry's own error must be the one reported
+      applyResult(await executeWithPoolFallback());
+      if (providerResponse.ok) markLaneRejectsMedia(provider, connectionId, model);
+    }
   }
 
   // Handle 401/403 - try token refresh (skip for noAuth providers)
@@ -557,7 +584,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = parsedNonOk || await parseUpstreamError(providerResponse, executor);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
+    appendRequestLog({
+      model, provider, connectionId, apiKey, endpoint: clientRawRequest?.endpoint,
+      status: `FAILED ${statusCode}`,
+      error: message,
+    }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
@@ -579,7 +610,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
-  const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
+  const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 
   // Provider forced streaming but client wants JSON. The Responses wire always

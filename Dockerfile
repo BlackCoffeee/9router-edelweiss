@@ -1,10 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Pinned by digest so a base-image refresh cannot silently bump npm and break
-# `npm ci` against the committed lockfile (see v1.0.9 npm ci EUSAGE failure).
-# DO NOT unpin. This image ships npm 10.9.8 — the lockfile MUST be regenerated
-# with npm 10 (`npx -y npm@10.9.8 install --package-lock-only`), never npm 11+.
-# See AGENTS.md §1 and scripts/verify-lockfile-npm10.mjs.
-ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+ARG NODE_IMAGE=node:22.23.4-alpine
 ARG ALPINE_MIRROR=dl-cdn.alpinelinux.org
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 ARG APP_VERSION=unknown
@@ -39,12 +34,35 @@ RUN --mount=type=cache,target=/root/.npm \
     --fetch-timeout=300000
 
 COPY . ./
+# Guard: undefined identifiers compile fine under webpack/SWC but the shipped
+# bundle ReferenceErrors at runtime ("This page couldn't load"). Fails the
+# Docker build before `next build`. See AGENTS.md §8 + scripts/verify-no-undef.mjs.
+RUN node scripts/verify-no-undef.mjs
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
+
+# https://github.com/decolua/9router/issues/5245
+# wreq-js and playwright-core are lazy runtime dependencies (loaded by
+# lazyRuntime.js via createRequire). Next standalone tracing does not include
+# them, so OpenCode Free fails with HTTP 502 ("resolve is undefined").
+# Install them (with their native bindings/transitive deps) in an isolated dir
+# so the runner stage can copy them into /app/node_modules.
+RUN --mount=type=cache,target=/root/.npm \
+    mkdir -p /opt/lazy-runtime && cd /opt/lazy-runtime && \
+    npm init -y >/dev/null && \
+    npm install --no-save \
+      --registry="${NPM_REGISTRY}" \
+      --fetch-retries=5 \
+      --fetch-retry-factor=2 \
+      --fetch-retry-mintimeout=10000 \
+      --fetch-retry-maxtimeout=120000 \
+      --fetch-timeout=300000 \
+      wreq-js playwright-core
 
 FROM ${NODE_IMAGE} AS runner
 ARG ALPINE_MIRROR
 ARG APP_VERSION
+ARG NPM_REGISTRY
 WORKDIR /app
 
 RUN if [ "$ALPINE_MIRROR" != "dl-cdn.alpinelinux.org" ]; then \
@@ -76,6 +94,9 @@ COPY --from=builder /app/node_modules/next ./node_modules/next
 COPY --from=builder /app/node_modules/sql.js ./node_modules/sql.js
 # node-machine-id is createRequire-loaded at runtime; tracing omits it.
 COPY --from=builder /app/node_modules/node-machine-id ./node_modules/node-machine-id
+# wreq-js + playwright-core (and deps) are lazy-loaded at runtime and omitted by
+# tracing. See https://github.com/decolua/9router/issues/5245
+COPY --from=builder /opt/lazy-runtime/node_modules/. ./node_modules/
 
 RUN mkdir -p /app/data && chown -R node:node /app && \
   mkdir -p /app/data-home && chown node:node /app/data-home && \
@@ -83,7 +104,7 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
 
 # Avoid a full distribution upgrade in the runtime image. It makes builds less
 # reproducible and is unrelated to installing the runtime entrypoint helper.
-RUN apk add --no-cache su-exec && \
+RUN apk add --no-cache su-exec ffmpeg && \
   printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 

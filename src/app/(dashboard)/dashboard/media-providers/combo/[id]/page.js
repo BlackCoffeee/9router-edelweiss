@@ -77,7 +77,7 @@ export default function ComboDetailPage() {
         const k = await keysRes.json();
         setApiKey((k.keys || []).find((x) => x.isActive !== false)?.key || "");
       }
-      if (connsRes.ok) setConnections((await connsRes.json()).connections || []);
+      if (connsRes.ok) setConnections(((await connsRes.json()).connections || []).filter((x) => x.isActive !== false));
       if (!comboRes.ok) { setCombo(null); setLoading(false); return; }
       const c = await comboRes.json();
       setCombo(c);
@@ -91,8 +91,7 @@ export default function ComboDetailPage() {
     setLoading(false);
   };
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { fetchAll(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchAll(); }, [id]);
 
   const validateName = (v) => {
     if (!v.trim()) { setNameError("Name is required"); return false; }

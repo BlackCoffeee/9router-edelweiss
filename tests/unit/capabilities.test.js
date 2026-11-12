@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import * as capabilitiesModule from "../../open-sse/providers/capabilities.js";
 
 describe("getCapabilitiesForModel", () => {
 
@@ -19,6 +20,23 @@ describe("getCapabilitiesForModel", () => {
     });
     // the superseded text-only Flash id stays text-only
     expect(getCapabilitiesForModel("opencode-go", "deepseek-v4-flash").vision).toBe(false);
+    // The 1017 LoRA itself reads images (probed live on nli); only its `flex`
+    // servings drop them — probed 2026-11-11, an image_url part (data URI or
+    // https URL) 400s on the runcrate and nutaraline flex lanes. Text-only is
+    // what lets the vision capacity adapter route the image elsewhere.
+    expect(getCapabilitiesForModel("nli", "deepseek-v4.1-flash-1017").vision).toBe(true);
+    for (const flexId of [
+      "deepseek-v4.1-flash-1017:flex",
+      "deepseek-v4.1-flash-1017-flex",
+      "deepseek-v4.1-flash-1017-flex:high",
+    ]) {
+      expect(getCapabilitiesForModel(undefined, flexId).vision).toBe(false);
+      expect(getCapabilitiesForModel("nli", flexId).vision).toBe(false);
+    }
+    // Same lane 400s on a full inline data URI in TEXT (probed: 3.5 KB jpeg
+    // data URI in a tool result), so the payload is dropped before sending.
+    expect(getCapabilitiesForModel(undefined, "deepseek-v4.1-flash-1017:flex").dropInlineMediaPayloads).toBe(true);
+    expect(getCapabilitiesForModel("anthropic", "claude-sonnet-5.5").dropInlineMediaPayloads).toBe(false);
   });
   const claudeSonnet5Expected = {
     contextWindow: 1000000,
@@ -248,5 +266,136 @@ describe("getCapabilitiesForModel — codebuddy-cn provider overrides", () => {
     const caps = getCapabilitiesForModel("unknown-provider", "mimo-v2.5");
     expect(caps.vision).toBe(true);
     expect(caps.thinkingFormat).toBe("deepseek");
+  });
+
+  it("opencode-go claude-haiku-5-5 uses adaptive thinking, other haiku ids stay budget", () => {
+    // OpenCode Go rejects `thinking.type.enabled` for this model (400) and asks for
+    // thinking.type.adaptive + output_config.effort, which claude-adaptive emits.
+    const haiku55 = getCapabilitiesForModel("opencode-go", "claude-haiku-5-5");
+    expect(haiku55.thinkingFormat).toBe("claude-adaptive");
+    expect(haiku55.reasoning).toBe(true);
+    expect(haiku55.vision).toBe(true);
+    // The upstream catalog reports context_length 1000000 for this id; without the
+    // explicit value the provider entry does NOT inherit MODEL_CAPABILITIES (it is
+    // spread over DEFAULT_CAPABILITIES only) and the model shows 200k. maxOutput is
+    // stated for the same reason: the override short-circuits before the catalog
+    // overlay, so the synced catalog's 128000 would never be applied otherwise.
+    expect(haiku55.contextWindow).toBe(1000000);
+    expect(haiku55.maxOutput).toBe(128000);
+
+    // The override is provider-scoped: the global haiku pattern (claude-budget) still
+    // governs every other provider, including the bare/anthropic lookup.
+    expect(getCapabilitiesForModel(undefined, "claude-haiku-5-5").thinkingFormat).toBe("claude-budget");
+    expect(getCapabilitiesForModel("claude", "claude-haiku-5-5").thinkingFormat).toBe("claude-budget");
+    expect(getCapabilitiesForModel("opencode-go", "claude-haiku-4-5-20251001").thinkingFormat).toBe("claude-budget");
+  });
+
+  it("commandcode claude-haiku-5-5 is pinned to the catalog limits, not the fallback", () => {
+    // The commandcode branch returns 1M/384k for every unlisted model — for this id
+    // that fallback happened to guess the context right, but only by accident: the
+    // provider catalog (GET api.commandcode.ai/provider/v1/models) reports
+    // context_length 1000000 with maxOutput 128000 (claude-haiku-4-5 stays 200000).
+    // The explicit entry pins maxOutput and keeps thinking on the commandcode path.
+    const caps = getCapabilitiesForModel("commandcode", "claude-haiku-5-5");
+    expect(caps.contextWindow).toBe(1000000);
+    expect(caps.maxOutput).toBe(128000);
+    expect(caps.thinkingFormat).toBe("commandcode");
+    expect(caps.vision).toBe(true);
+    // the generic fallback still governs unlisted commandcode models
+    expect(getCapabilitiesForModel("commandcode", "deepseek/deepseek-v4.1-flash")).toMatchObject({
+      contextWindow: 1000000,
+      maxOutput: 384000,
+    });
+  });
+});
+
+describe("OpenCode Free ids newer than the capability tables", () => {
+  // ids missing here fall through to DEFAULT_CAPABILITIES (reasoning: false),
+  // and applyThinking() then deletes the client's reasoning_effort — see #2690.
+  // Modalities/limits are taken verbatim from models.dev.
+  it("reports reasoning and the models.dev limits for space-bunny", () => {
+    expect(getCapabilitiesForModel(undefined, "space-bunny-free")).toMatchObject({
+      reasoning: true,
+      thinkingFormat: "openai",
+      contextWindow: 1048576,
+      maxOutput: 524288,
+    });
+    expect(getCapabilitiesForModel("opencode-go", "space-bunny")).toMatchObject({
+      reasoning: true,
+      contextWindow: 1048576,
+      maxOutput: 524288,
+    });
+  });
+
+  it("caps oc/deepseek-v4.1-flash-free at the real backend limit (~330k) instead of 1M", () => {
+    const caps = getCapabilitiesForModel("opencode", "deepseek-v4.1-flash-free");
+    // The OpenCode Free backend rejects requests above ~330k prompt tokens (issue #5097).
+    // The published context_length must not exceed the real window, otherwise clients
+    // (VS Code Copilot etc.) never compact and hard-fail mid-session.
+    expect(caps.contextWindow).toBeLessThanOrEqual(330000);
+    expect(caps.maxOutput).toBeLessThanOrEqual(caps.contextWindow);
+    // Vision and reasoning should still be reported correctly.
+    expect(caps.vision).toBe(true);
+    expect(caps.reasoning).toBe(true);
+  });
+
+  it("keeps per-id modalities and limits instead of a generic floor", () => {
+    // text-only, small context — a shared pattern rule would overstate both.
+    expect(getCapabilitiesForModel(undefined, "big-pickle")).toMatchObject({
+      reasoning: true,
+      vision: false,
+      contextWindow: 200000,
+      maxOutput: 32000,
+    });
+    expect(getCapabilitiesForModel(undefined, "ring-2.6-1t-free")).toMatchObject({
+      reasoning: true,
+      vision: false,
+      contextWindow: 262000,
+      maxOutput: 66000,
+    });
+    expect(getCapabilitiesForModel(undefined, "exo-free")).toMatchObject({
+      reasoning: true,
+      vision: true,
+      contextWindow: 1048576,
+      maxOutput: 131072,
+    });
+  });
+});
+
+describe("getCapabilitiesForModel custom overrides", () => {
+  const install = (map) => {
+    capabilitiesModule.setCustomCapsSource({
+      getCaps(provider, model) {
+        return map[`${String(provider || "").toLowerCase()}|${String(model || "").toLowerCase()}`] || null;
+      },
+    });
+  };
+
+  it("keeps an explicit false from a dashboard edit when the table says true", () => {
+    const model = "deepseek-v4.1-flash";
+    expect(getCapabilitiesForModel("opencode-go", model).vision).toBe(true);
+    install({ [`opencode-go|${model}`]: { vision: false, reasoning: false } });
+    try {
+      expect(getCapabilitiesForModel("opencode-go", model)).toMatchObject({ vision: false, reasoning: false });
+      // A provider-scoped edit leaves the same id on other providers alone.
+      expect(getCapabilitiesForModel("openrouter", model).vision).toBe(true);
+    } finally {
+      capabilitiesModule.setCustomCapsSource(null);
+    }
+    expect(getCapabilitiesForModel("opencode-go", model).vision).toBe(true);
+  });
+
+  it("lets a dashboard edit grant vision a pattern denies", () => {
+    const model = "deepseek-v4.1-flash-1017:flex";
+    const before = getCapabilitiesForModel("", model).vision;
+    install({ [`|${model}`]: { vision: true } });
+    try {
+      expect(getCapabilitiesForModel("", model).vision).toBe(true);
+      // Overlays merge, so the pattern's limits survive the edit.
+      expect(getCapabilitiesForModel("", model).contextWindow).toBeGreaterThan(0);
+    } finally {
+      capabilitiesModule.setCustomCapsSource(null);
+    }
+    expect(getCapabilitiesForModel("", model).vision).toBe(before);
   });
 });
