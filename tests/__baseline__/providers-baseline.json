@@ -1381,6 +1381,10 @@
   },
   "synthetic": {
     "baseUrl": "https://api.synthetic.new/openai/v1/chat/completions",
+    "validateUrl": "https://api.synthetic.new/v2/quotas",
+    "usage": {
+      "url": "https://api.synthetic.new/v2/quotas"
+    },
     "format": "openai"
   }
 }
