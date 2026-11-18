@@ -686,8 +686,15 @@ export default function APIPageClient({ machineId }) {
     }
   };
 
-  // Save a key's access (restricted flag + allow list).
-  const handleUpdateKeyAccess = async (id, access) => {
+  // Save a key's access (restricted flag + allow list). Update the row
+  // optimistically so a burst of removals / "select all" never computes from a
+  // stale list; a sequence counter keeps an older response from overwriting a
+  // newer edit. PUTs for one key are chained: the route writes the whole access
+  // object, so two overlapping requests could otherwise commit out of order and
+  // leave the DB on an older list than the UI.
+  const accessSaveSeq = useRef(new Map());
+  const accessSaveChain = useRef(new Map());
+  const persistKeyAccess = async (id, access, seq) => {
     try {
       const res = await fetch(`/api/keys/${id}`, {
         method: "PUT",
@@ -696,13 +703,32 @@ export default function APIPageClient({ machineId }) {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.key) {
-        setKeys(prev => prev.map(k => k.id === id ? { ...k, access: data.key.access } : k));
+        if (accessSaveSeq.current.get(id) === seq) {
+          setKeys(prev => prev.map(k => k.id === id ? { ...k, access: data.key.access } : k));
+        }
       } else {
         console.log("Error updating key access:", data.error || res.status);
+        if (accessSaveSeq.current.get(id) === seq) {
+          const keysRes = await fetch("/api/keys").catch(() => null);
+          if (keysRes?.ok) setKeys((await keysRes.json()).keys || []);
+        }
       }
     } catch (error) {
       console.log("Error updating key access:", error);
+      if (accessSaveSeq.current.get(id) === seq) {
+        const keysRes = await fetch("/api/keys").catch(() => null);
+        if (keysRes?.ok) setKeys((await keysRes.json()).keys || []);
+      }
     }
+  };
+
+  const handleUpdateKeyAccess = (id, access) => {
+    const seq = (accessSaveSeq.current.get(id) || 0) + 1;
+    accessSaveSeq.current.set(id, seq);
+    setKeys(prev => prev.map(k => k.id === id ? { ...k, access } : k));
+    const save = () => persistKeyAccess(id, access, seq);
+    const prev = accessSaveChain.current.get(id) || Promise.resolve();
+    accessSaveChain.current.set(id, prev.then(save, save));
   };
 
   const maskKey = (fullKey) => {
@@ -1021,7 +1047,7 @@ export default function APIPageClient({ machineId }) {
           <div>
             <p className="font-medium">Combos only</p>
             <p className="text-sm text-text-muted">
-              Expose only combos in /v1/models and reject direct model calls
+              Expose only combos in /v1/models and reject direct LLM model calls
             </p>
           </div>
           <Toggle
