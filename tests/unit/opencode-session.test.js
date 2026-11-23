@@ -87,10 +87,60 @@ describe("OpenCode Free Session ID Format", () => {
     expect(counterOf(generateZenSessionId(1_700_000_000_000))).toBe(1);
   });
 
+  // Upstream also decodes the prefix timestamp and refuses a session minted in
+  // the future or before the free-tier window (live probes 2026-10-26: a
+  // Date.now() session passed 10/10, digest-derived ones 1/10).
+  it("mints translated sessions at the current time instead of from a digest", () => {
+    // The 48-bit prefix carries 36 bits of milliseconds plus a 12-bit counter,
+    // so the decoded time is the mint time modulo 2^36.
+    const TIME_MASK = (1n << 36n) - 1n;
+    const timeOf = (id) => Number((~BigInt(`0x${id.slice(4, 16)}`) & ((1n << 48n) - 1n)) >> 12n);
+    const before = Date.now();
+    const translated = translateSessionId(`fresh-${before}`, "claude");
+    const after = Date.now();
+
+    expect(timeOf(translated)).toBeGreaterThanOrEqual(Number(BigInt(before) & TIME_MASK));
+    expect(timeOf(translated)).toBeLessThanOrEqual(Number(BigInt(after) & TIME_MASK));
+  });
+
+  it("reuses the memoized session for one conversation", () => {
+    const raw = "claude:memoized-conversation";
+    const first = translateSessionId(raw, "claude");
+    expect(translateSessionId(raw, "claude")).toBe(first);
+    // A different conversation still gets its own session.
+    expect(translateSessionId(`${raw}-other`, "claude")).not.toBe(first);
+  });
+
   it("preserves already-valid OpenCode sessions without re-hashing", () => {
     const valid = "ses_f534dfae8ffeCy4Ee4tLWNygDc";
     expect(translateSessionId(valid)).toBe(valid);
     expect(translateSessionId(`  ${valid}  `)).toBe(valid);
+  });
+
+  // Upstream Zen decodes the 12-hex prefix as ~(Date.now() * 4096 + counter) and
+  // rejects a prefix built from anything but a recent timestamp with
+  // 403 FreeTierError, so the translated id must carry a real clock value.
+  it("encodes a recent timestamp, not hash bits", () => {
+    const MASK = 0xffffffffffffn;
+    // The 12 hex chars are the low 48 bits of ~(ms * 4096 + counter).
+    const decodedUnits = (id) => MASK - BigInt(`0x${id.slice(4, 16)}`);
+    const nowUnits = (BigInt(Date.now()) * 0x1000n) & MASK;
+
+    for (const translate of [translateSessionId, translateZenSessionId]) {
+      const id = translate("claude:fresh-mint-timestamp-check", "claude");
+      expect(id).toMatch(OPENCODE_SESSION_RE);
+      const diffMs = Number((decodedUnits(id) - nowUnits) / 0x1000n);
+      expect(Math.abs(diffMs)).toBeLessThan(60_000);
+    }
+  });
+
+  it("is stable for the same downstream session and differs across sessions", () => {
+    for (const translate of [translateSessionId, translateZenSessionId]) {
+      const a1 = translate("conv-stability-a", "claude");
+      expect(translate("conv-stability-a", "claude")).toBe(a1);
+      expect(translate("conv-stability-b", "claude")).not.toBe(a1);
+      expect(translate("conv-stability-a", "codex")).not.toBe(a1);
+    }
   });
 });
 

@@ -37,10 +37,19 @@ vi.mock("@/shared/constants/config", () => ({
         resetAtDriftMs: 30000,
         minPingIntervalMs: 600000,
         skipWhenBlockingQuotaExhausted: true,
-        pingModel: "gpt-5.5",
+        pingModel: "gpt-5.6-terra",
         pingText: "hi",
         pingInstructions: "Reply with OK.",
         pingReasoningEffort: "none",
+      },
+      antigravity: {
+        settingsKey: "antigravityAutoPing",
+        quotaKey: "gemini_session",
+        minPingIntervalMs: 600000,
+        skipWhenBlockingQuotaExhausted: true,
+        pingModel: "gemini-3.8-flash-low",
+        pingText: "hi",
+        pingMaxTokens: 1,
       },
     },
   },
@@ -66,6 +75,10 @@ vi.mock("open-sse/services/usage/codex.js", () => ({
   getCodexUsage: vi.fn(),
 }));
 
+vi.mock("open-sse/services/usage/google.js", () => ({
+  getAntigravityUsage: vi.fn(),
+}));
+
 vi.mock("open-sse/executors/index.js", () => ({
   getExecutor: vi.fn(),
 }));
@@ -77,6 +90,7 @@ describe("quota auto-ping", () => {
   let state;
   let getCodexUsage;
   let getClaudeUsage;
+  let getAntigravityUsage;
   let getExecutor;
   let codexResponseText;
 
@@ -88,6 +102,7 @@ describe("quota auto-ping", () => {
 
     ({ getCodexUsage } = await import("open-sse/services/usage/codex.js"));
     ({ getClaudeUsage } = await import("open-sse/services/usage/claude.js"));
+    ({ getAntigravityUsage } = await import("open-sse/services/usage/google.js"));
     ({ getExecutor } = await import("open-sse/executors/index.js"));
     ({ runQuotaAutoPingTick, configureQuotaAutoPing } = await import("../../src/shared/services/quotaAutoPing.js"));
 
@@ -278,7 +293,7 @@ describe("quota auto-ping", () => {
     expect(deps.updateProviderConnection).not.toHaveBeenCalled();
   });
 
-  it("sends one tiny gpt-5.5 Codex request through the executor", async () => {
+  it("sends one tiny gpt-5.6-terra Codex request through the executor", async () => {
     deps.getSettings.mockResolvedValue({ codexAutoPing: { connections: { "codex-1": true } } });
     deps.getProviderConnections.mockImplementation(async ({ provider }) => (
       provider === "codex"
@@ -295,7 +310,7 @@ describe("quota auto-ping", () => {
     const executor = deps.getExecutor.mock.results[0].value;
     expect(deps.getExecutor).toHaveBeenCalledWith("codex");
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({
-      model: "gpt-5.5",
+      model: "gpt-5.6-terra",
       stream: true,
       credentials: expect.objectContaining({
         accessToken: "token",
@@ -303,7 +318,7 @@ describe("quota auto-ping", () => {
         providerSpecificData: { workspaceId: "ws-1" },
       }),
       body: {
-        model: "gpt-5.5",
+        model: "gpt-5.6-terra",
         input: [{
           type: "message",
           role: "user",
@@ -351,6 +366,90 @@ describe("quota auto-ping", () => {
     expect(deps.getExecutor).not.toHaveBeenCalled();
   });
 
+  it.each([10, 30, 54])("catches a Claude reset when the next tick is %s seconds late", async (seconds) => {
+    const connection = { id: "claude-1", provider: "claude", authType: "oauth", accessToken: "token" };
+    deps.getSettings.mockResolvedValue({ claudeAutoPing: { connections: { "claude-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => provider === "claude" ? [connection] : []);
+    deps.updateProviderConnection.mockImplementation(async (_id, patch) => Object.assign(connection, patch));
+    getClaudeUsage.mockReset().mockResolvedValueOnce({
+      quotas: { "session (5h)": { resetAt: "2026-01-01T12:00:00.000Z" } },
+    }).mockResolvedValueOnce({
+      quotas: { "session (5h)": { resetAt: "2026-01-01T17:00:00.000Z" } },
+    }).mockResolvedValueOnce({
+      quotas: { "session (5h)": { resetAt: "2026-01-01T22:00:00.000Z" } },
+    });
+
+    // A 60-second scheduler tick can miss the entire five-second lead window.
+    vi.setSystemTime(new Date(`2026-01-01T11:59:${String(seconds).padStart(2, "0")}.000Z`));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date(`2026-01-01T12:00:${String(seconds).padStart(2, "0")}.000Z`));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+    expect(connection.lastPingedResetAt).toBe("2026-01-01T12:00:00.000Z");
+    expect(connection.lastPingedResetKey).toBe("2026-01-01T12:00:00.000Z");
+
+    vi.setSystemTime(new Date("2026-01-01T12:01:59.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+
+    // Catching up must not mark the *next* window as already pinged.
+    vi.setSystemTime(new Date("2026-01-01T17:00:30.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(2);
+    expect(connection.lastPingedResetKey).toBe("2026-01-01T17:00:00.000Z");
+  });
+
+  it.each(["HTTP error", "network error"])("retries a missed Claude reset after cooldown on %s", async (failure) => {
+    deps.getSettings.mockResolvedValue({ claudeAutoPing: { connections: { "claude-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => provider === "claude" ? [{
+      id: "claude-1", provider: "claude", authType: "oauth", accessToken: "token",
+    }] : []);
+    state.resetCache["claude:claude-1"] = "2026-01-01T12:00:00.000Z";
+    getClaudeUsage.mockReset().mockResolvedValue({
+      quotas: { "session (5h)": { resetAt: "2026-01-01T17:00:00.000Z" } },
+    });
+    if (failure === "HTTP error") deps.proxyAwareFetch.mockResolvedValueOnce({ ok: false });
+    else deps.proxyAwareFetch.mockRejectedValueOnce(new Error("connection reset"));
+
+    vi.setSystemTime(new Date("2026-01-01T12:00:30.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+    expect(deps.updateProviderConnection).not.toHaveBeenCalled();
+    expect(state.resetCache["claude:claude-1"]).toBe("2026-01-01T12:00:00.000Z");
+
+    vi.setSystemTime(new Date("2026-01-01T12:01:30.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(new Date("2026-01-01T12:16:00.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(2);
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("claude-1", expect.objectContaining({
+      lastPingedResetKey: "2026-01-01T12:00:00.000Z",
+    }));
+    expect(state.resetCache["claude:claude-1"]).toBe("2026-01-01T17:00:00.000Z");
+    expect(state.failureCache["claude:claude-1"]).toBeUndefined();
+  });
+
+  it("does not catch up a Claude reset that was already pinged", async () => {
+    deps.getSettings.mockResolvedValue({ claudeAutoPing: { connections: { "claude-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => provider === "claude" ? [{
+      id: "claude-1", provider: "claude", authType: "oauth", accessToken: "token",
+      lastPingedResetKey: "2026-01-01T12:00:00.000Z",
+    }] : []);
+    state.resetCache["claude:claude-1"] = "2026-01-01T12:00:00.000Z";
+    vi.setSystemTime(new Date("2026-01-01T12:00:30.000Z"));
+    getClaudeUsage.mockResolvedValue({
+      quotas: { "session (5h)": { resetAt: "2026-01-01T17:00:00.000Z" } },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.proxyAwareFetch).not.toHaveBeenCalled();
+  });
+
   it("keeps Claude session quota key behavior", async () => {
     deps.getSettings.mockResolvedValue({ claudeAutoPing: { connections: { "claude-1": true } } });
     deps.getProviderConnections.mockImplementation(async ({ provider }) => (
@@ -367,6 +466,430 @@ describe("quota auto-ping", () => {
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1,
       messages: [{ role: "user", content: "hi" }],
+    });
+  });
+
+  it("does not ping Antigravity when setting is absent", async () => {
+    deps.getSettings.mockResolvedValue({});
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(getAntigravityUsage).not.toHaveBeenCalled();
+    expect(deps.getExecutor).not.toHaveBeenCalled();
+  });
+
+  it("sends Antigravity ping when session reset is due", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: { gemini_session: { used: 100, total: 1000, remaining: 900, resetAt: "2026-01-01T11:59:00.000Z" } },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    const executor = deps.getExecutor.mock.results[0].value;
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+      lastPingedResetKey: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("sends one tiny gemini-3.8-flash-low Antigravity request through the executor", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity"
+        ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token", refreshToken: "refresh-token", email: "user@example.com", providerSpecificData: { projectId: "proj-1" } }]
+        : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: { gemini_session: { used: 0, total: 1000, remaining: 1000, resetAt: "2026-01-01T11:59:00.000Z" } },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    const executor = deps.getExecutor.mock.results[0].value;
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gemini-3.8-flash-low",
+      stream: true,
+      credentials: expect.objectContaining({
+        accessToken: "token",
+        refreshToken: "refresh-token",
+        connectionId: "ag-1",
+        email: "user@example.com",
+        projectId: "proj-1",
+        providerSpecificData: { projectId: "proj-1" },
+      }),
+      body: {
+        model: "gemini-3.8-flash-low",
+        request: {
+          contents: [{
+            role: "user",
+            parts: [{ text: "hi" }],
+          }],
+          generationConfig: {
+            maxOutputTokens: 1,
+          },
+        },
+      },
+    }));
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+      lastPingedResetKey: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("falls back to gemini-3.8-flash-high quota when gemini_session is omitted", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: { "gemini-3.8-flash-high": { used: 0, total: 1000, remaining: 1000, resetAt: "2026-01-01T11:59:00.000Z" } },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("falls back to gemini-3.8-flash-low and does not block ping when flash-high is exhausted", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: {
+        "gemini-3.8-flash-high": { used: 1000, total: 1000, remaining: 0, resetAt: "2026-01-01T11:59:00.000Z" },
+        "gemini-3.8-flash-low": { used: 200, total: 1000, remaining: 800, resetAt: "2026-01-01T11:59:00.000Z" },
+      },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("does not ping Antigravity when weekly quota is exhausted", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: {
+        gemini_session: { used: 0, total: 1000, remaining: 1000, resetAt: "2026-01-01T11:59:00.000Z" },
+        gemini_weekly: { used: 1000, total: 1000, remaining: 0, resetAt: "2026-01-05T00:00:00.000Z" },
+      },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).not.toHaveBeenCalled();
+    expect(deps.updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("does not block Antigravity ping when an individual model is exhausted but session reset is due", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: {
+        gemini_session: { used: 0, total: 1000, remaining: 1000, resetAt: "2026-01-01T11:59:00.000Z" },
+        "claude-sonnet-5-5-high": { used: 1000, total: 1000, remaining: 0, resetAt: "2026-01-01T11:59:00.000Z" },
+      },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("does not block Antigravity Gemini ping when Claude weekly or Argon weekly quota is exhausted", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+    ));
+    getAntigravityUsage.mockResolvedValue({
+      quotas: {
+        gemini_session: { used: 0, total: 1000, remaining: 1000, resetAt: "2026-01-01T11:59:00.000Z" },
+        gemini_weekly: { used: 100, total: 1000, remaining: 900, resetAt: "2026-01-05T00:00:00.000Z" },
+        claude_gpt_weekly: { used: 1000, total: 1000, remaining: 0, resetAt: "2026-01-05T00:00:00.000Z" },
+        gemini_argon_weekly: { used: 1000, total: 1000, remaining: 0, resetAt: "2026-01-05T00:00:00.000Z" },
+      },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+    expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+      lastPingedResetAt: "2026-01-01T11:59:00.000Z",
+    }));
+  });
+
+  it("catches an Antigravity reset when the next tick is late", async () => {
+    const connection = { id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" };
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => provider === "antigravity" ? [connection] : []);
+    deps.updateProviderConnection.mockImplementation(async (_id, patch) => Object.assign(connection, patch));
+    getAntigravityUsage.mockResolvedValueOnce({
+      quotas: { gemini_session: { resetAt: "2026-01-01T12:00:00.000Z" } },
+    }).mockResolvedValueOnce({
+      quotas: { gemini_session: { resetAt: "2026-01-01T17:00:00.000Z" } },
+    });
+
+    vi.setSystemTime(new Date("2026-01-01T11:59:30.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.getExecutor).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date("2026-01-01T12:00:30.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+    expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+    expect(connection.lastPingedResetAt).toBe("2026-01-01T12:00:00.000Z");
+    expect(connection.lastPingedResetKey).toBe("2026-01-01T12:00:00.000Z");
+  });
+
+  it("skips non-OAuth Antigravity connections", async () => {
+    deps.getSettings.mockResolvedValue({ antigravityAutoPing: { connections: { "ag-1": true } } });
+    deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+      provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "apikey", accessToken: "token" }] : []
+    ));
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(getAntigravityUsage).not.toHaveBeenCalled();
+    expect(deps.getExecutor).not.toHaveBeenCalled();
+  });
+
+  describe("anchored schedule", () => {
+    const schedule = {
+      enabled: true,
+      anchor: "09:30",
+      timezone: "America/Sao_Paulo",
+      windowHours: 5,
+      slotsPerDay: 3,
+    };
+
+    const codexConnection = (extra = {}) => ({
+      id: "codex-1", provider: "codex", authType: "oauth", accessToken: "token", ...extra,
+    });
+
+    const settingsWithSchedule = (overrides = {}) => ({
+      codexAutoPing: {
+        connections: { "codex-1": true },
+        schedules: { "codex-1": { ...schedule, ...overrides } },
+      },
+    });
+
+    let connection = codexConnection();
+
+    beforeEach(() => {
+      connection = codexConnection();
+      deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+        provider === "codex" ? [connection] : []
+      ));
+    });
+
+    it("pings on the 09:30 BRT slot even when resetAt is stable", async () => {
+      // 12:31 UTC = 09:31 BRT — the reactive path alone would stay quiet here.
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("does not repeat a slot that was already pinged", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      connection = codexConnection({ lastPingedSlotKey: "2026-08-20#0" });
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("stays quiet overnight", async () => {
+      // 06:00 UTC = 03:00 BRT, outside every slot.
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("keeps the reactive ping working alongside the schedule", async () => {
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:01:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.not.objectContaining({
+        lastPingedSlotKey: expect.anything(),
+      }));
+    });
+
+    it("ignores a disabled schedule", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule({ enabled: false }));
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("pings Claude on a slot before its reset is due", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        claudeAutoPing: {
+          connections: { "claude-1": true },
+          schedules: { "claude-1": schedule },
+        },
+      });
+      deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+        provider === "claude" ? [{ id: "claude-1", provider: "claude", authType: "oauth", accessToken: "token" }] : []
+      ));
+      state.resetCache["claude:claude-1"] = "2026-08-20T23:00:00.000Z";
+      getClaudeUsage.mockResolvedValue({
+        quotas: { "session (5h)": { resetAt: "2026-08-20T23:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("claude-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("pings Antigravity on a slot before its reset is due", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        antigravityAutoPing: {
+          connections: { "ag-1": true },
+          schedules: { "ag-1": schedule },
+        },
+      });
+      deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+        provider === "antigravity" ? [{ id: "ag-1", provider: "antigravity", authType: "oauth", accessToken: "token" }] : []
+      ));
+      state.resetCache["antigravity:ag-1"] = "2026-08-20T23:00:00.000Z";
+      getAntigravityUsage.mockResolvedValue({
+        quotas: { gemini_session: { resetAt: "2026-08-20T23:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledWith("antigravity");
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("ag-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("runs a schedule on a connection with the reactive ping switched off", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        codexAutoPing: {
+          connections: { "codex-1": false },
+          schedules: { "codex-1": schedule },
+        },
+      });
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("does not fall back to the reactive ping when only the schedule is on", async () => {
+      // resetAt slides, which is exactly what the reactive Codex path pings on.
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        codexAutoPing: {
+          connections: { "codex-1": false },
+          schedules: { "codex-1": schedule },
+        },
+      });
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:01:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("needs the scheduler running for a schedule alone", async () => {
+      const { hasAnyAutoPingEnabled } = await import("../../src/shared/services/quotaAutoPing.js");
+
+      expect(hasAnyAutoPingEnabled({ codexAutoPing: { connections: { "codex-1": false } } })).toBe(false);
+      expect(hasAnyAutoPingEnabled({
+        codexAutoPing: { connections: { "codex-1": false }, schedules: { "codex-1": schedule } },
+      })).toBe(true);
+      expect(hasAnyAutoPingEnabled({
+        codexAutoPing: { connections: {}, schedules: { "codex-1": { ...schedule, enabled: false } } },
+      })).toBe(false);
+      expect(hasAnyAutoPingEnabled({
+        antigravityAutoPing: { connections: { "ag-1": false }, schedules: { "ag-1": schedule } },
+      })).toBe(true);
+    });
+
+    it("skips the slot when the quota is exhausted", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 100, total: 100, remaining: 0, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
     });
   });
 });

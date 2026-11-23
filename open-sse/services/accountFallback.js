@@ -1,4 +1,4 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, MAX_RATE_LIMIT_COOLDOWN_MS } from "../config/errorConfig.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -13,12 +13,62 @@ export function getQuotaCooldown(backoffLevel = 0) {
 }
 
 /**
+ * Parse the provider's ACTUAL rate-limit reset window from a 429 body/headers,
+ * so an account is locked for the real duration instead of a fixed cooldown.
+ * Supports: Google/Antigravity RetryInfo ("retryDelay": "1976.3s"),
+ * OpenAI/Codex absolute reset ("resets_at"/"reset_at" epoch s|ms),
+ * OpenRouter/RateLimit ("X-RateLimit-Reset" epoch s|ms) and "Retry-After: N".
+ * @param {string|object} errorText - 429 body/headers, string or object.
+ * @param {number} now - reference epoch ms (defaults to Date.now()).
+ * @returns {number|null} ms until reset, or null when none is present.
+ */
+export function parseProviderResetMs(errorText, now = Date.now()) {
+  if (!errorText) return null;
+  const s = typeof errorText === "string" ? errorText : JSON.stringify(errorText);
+  let m;
+  // Relative seconds (Google/Antigravity RetryInfo): "retryDelay": "1976.365s"
+  if ((m = s.match(/"?retry[_-]?delay"?\s*[:=]\s*"?\s*([0-9]+(?:\.[0-9]+)?)\s*s/i))) {
+    return Math.round(parseFloat(m[1]) * 1000);
+  }
+  // Absolute reset epoch (s or ms): resets_at / reset_at / X-RateLimit-Reset
+  if ((m = s.match(/"?(?:resets?_at|x-?ratelimit-?reset|ratelimit-?reset)"?\s*[:=]\s*"?\s*([0-9]{9,})/i))) {
+    let v = parseInt(m[1], 10);
+    if (v < 1e12) v *= 1000; // seconds -> ms
+    const ms = v - now;
+    return ms > 0 ? ms : null;
+  }
+  // Retry-After: N seconds (header echoed into the body)
+  if ((m = s.match(/"?retry[_-]?after"?\s*[:=]\s*"?\s*([0-9]+)\b/i))) {
+    return parseInt(m[1], 10) * 1000;
+  }
+  return null;
+}
+
+/**
+ * Resolve the 429 account cooldown: prefer the provider's own reset window over
+ * the static exponential backoff, floored at the static value and capped at
+ * MAX_RATE_LIMIT_COOLDOWN_MS so a bogus huge value can't lock an account forever.
+ */
+export function resolveCooldownMs(newLevel, errorText) {
+  const staticMs = getQuotaCooldown(newLevel);
+  const providerMs = parseProviderResetMs(errorText);
+  if (providerMs == null || !(providerMs > 0)) return staticMs;
+  return Math.min(Math.max(providerMs, staticMs), MAX_RATE_LIMIT_COOLDOWN_MS);
+}
+
+/**
  * Check if error should trigger account fallback (switch to next account)
  * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
- * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, requestScoped?: boolean }}
+ *
+ * `shouldFallback` answers "is the CREDENTIAL at fault?" (account rotation).
+ * `requestScoped` answers "is the REQUEST itself what this member rejected?"
+ * (combo rotation). They are different questions: a context overflow or a
+ * validation 400 means the credential is healthy but this member cannot serve
+ * this request, so combo rotation must still try the next member.
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null) {
   const lowerError = errorText
@@ -31,16 +81,20 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
     if (rule.text && lowerError && lowerError.includes(rule.text)) {
       if (rule.backoff) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
+        return { shouldFallback: true, cooldownMs: resolveCooldownMs(newLevel, errorText), newBackoffLevel: newLevel };
       }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+      return {
+        shouldFallback: true,
+        cooldownMs: rule.cooldownMs,
+        modelScoped: Boolean(rule.modelScoped),
+      };
     }
 
     // Status-based rule: match HTTP status code
     if (rule.status && rule.status === status) {
       if (rule.backoff) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
+        return { shouldFallback: true, cooldownMs: resolveCooldownMs(newLevel, errorText), newBackoffLevel: newLevel };
       }
       return { shouldFallback: true, cooldownMs: rule.cooldownMs };
     }
@@ -57,7 +111,7 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   // Account-scoped statuses keep their rules above (401/402/403/404/429), and the
   // text rules still win for rate-limit / quota / capacity wording.
   if (status >= 400 && status < 500 && status !== 401 && status !== 402 && status !== 403 && status !== 429) {
-    return { shouldFallback: false, cooldownMs: 0 };
+    return { shouldFallback: false, cooldownMs: 0, requestScoped: true };
   }
 
   // Default: transient cooldown for any unmatched error

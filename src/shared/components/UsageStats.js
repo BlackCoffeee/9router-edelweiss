@@ -3,14 +3,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
-import { buildUsageProviderList } from "@/shared/utils/usageProviders";
+import { buildUsageProviderList, isLLMUsageProvider } from "@/shared/utils/usageProviders";
 
-// Keep providers without serviceKinds (default LLM) or with "llm" in serviceKinds
-function isLLMProvider(id) {
-  const p = AI_PROVIDERS[id];
-  if (!p?.serviceKinds) return true;
-  return p.serviceKinds.includes("llm");
-}
 import Badge from "./Badge";
 import Card from "./Card";
 import OverviewCards from "@/app/(dashboard)/dashboard/usage/components/OverviewCards";
@@ -120,7 +114,7 @@ function getGroupKey(item, keyField) {
   switch (keyField) {
     case "rawModel": return item.rawModel || "Unknown Model";
     case "accountName": return item.accountName || `Account ${item.connectionId?.slice(0, 8)}...` || "Unknown Account";
-    case "keyName": return item.keyName || "Unknown Key";
+    case "keyName": return item.apiKeyMasked ? `${item.keyName} (${item.apiKeyMasked})` : item.keyName || "Unknown Key";
     case "endpoint": return item.endpoint || "Unknown Endpoint";
     default: return item[keyField] || "Unknown";
   }
@@ -264,7 +258,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           connections: d?.connections || [],
           freeProviders: FREE_PROVIDERS,
           nodeNameMap,
-          isLLMProvider,
+          isLLMProvider: (id) => isLLMUsageProvider(id, AI_PROVIDERS, nodeNameMap),
           // Upstream dcc6a205: hidden providers must not appear in Usage even
           // when a connection exists (Providers page filters them out).
           isHiddenProvider: (id) => AI_PROVIDERS[id]?.hidden === true,
@@ -417,7 +411,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           ),
           renderDetailCells: (item) => (
             <>
-              <td className="px-6 py-3 font-medium">{item.keyName}</td>
+              <td className="px-6 py-3 font-medium font-mono text-xs">{item.apiKeyMasked || item.keyName}</td>
               <td className="px-6 py-3">{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant="neutral" size="sm">{item.provider}</Badge></td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>

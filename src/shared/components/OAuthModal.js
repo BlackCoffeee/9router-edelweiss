@@ -397,7 +397,24 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       }
 
       // Device code flow providers (must match oauth providers with flowType: "device_code")
-      if (DEVICE_CODE_PROVIDERS.includes(provider)) {
+      const deviceCodeProviders = [
+        "github",
+        "kiro",
+        "kimi",
+        "kimi-coding",
+        "kilocode",
+        "codebuddy-cn",
+        "codebuddy-intl",
+        "qoder",
+        "qoder-cn",
+        "grok-cli",
+        "muse",
+        "glm",
+        "minimax-code",
+        "minimax-code-global",
+        "nous",
+      ];
+      if (deviceCodeProviders.includes(provider)) {
         setIsDeviceCode(true);
         setStep("waiting");
 

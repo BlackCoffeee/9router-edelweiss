@@ -7,11 +7,13 @@ import {
 } from "../services/auth.js";
 import { getSettings, getProviderConnectionById } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
-import { getKeyAccessContext, enforceKeyAccessResolved } from "../services/keyAccess.js";
+import { getKeyAccessContext, enforceKeyAccessResolved, enforceKeyAccessVideoProvider } from "../services/keyAccess.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+
+const NO_AUTH_VIDEO_PROVIDERS = new Set(["veoaifree-web"]);
 import * as log from "../utils/logger.js";
 
 // Video generation is xAI-only today; requests without a provider prefix
@@ -135,6 +137,22 @@ export async function handleVideoCreate(request, action) {
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const idempotencyKey = request.headers.get("idempotency-key") || null;
 
+  // noAuth providers — executor-driven generation, no credential needed
+  if (NO_AUTH_VIDEO_PROVIDERS.has(provider)) {
+    const result = await handleVideoProxyCore({
+      provider,
+      action,
+      rawBody: forwardBody,
+      contentType: bodyInfo.contentType || null,
+      idempotencyKey: null,
+      credentials: null,
+      signal: request.signal,
+      log,
+    });
+    if (result.success) return result.response;
+    return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Video generation failed");
+  }
+
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
@@ -169,6 +187,8 @@ export async function handleVideoCreate(request, action) {
         await updateProviderCredentials(credentials.connectionId, {
           accessToken: newCreds.accessToken,
           refreshToken: newCreds.refreshToken,
+          // Executor-driven web providers rotate their cookie credential in place.
+          apiKey: newCreds.apiKey,
           providerSpecificData: newCreds.providerSpecificData,
           testStatus: "active",
         });
@@ -210,6 +230,11 @@ export async function handleVideoGet(request, requestId) {
 
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const provider = await resolveGetProvider(request, preferredConnectionId);
+
+  // Polls carry no model, so gate on the provider: a restricted key may only
+  // poll providers it is allowed to generate with.
+  const keyAccessDenied = await enforceKeyAccessVideoProvider(await getKeyAccessContext(request), provider);
+  if (keyAccessDenied) return keyAccessDenied;
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
   if (!credentials || credentials.allRateLimited) {

@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
+import { MODEL_ASSIGNMENT_ALL } from "@/shared/constants/modelAssignment";
 import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
@@ -12,6 +14,8 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   const [selectedProxyIds, setSelectedProxyIds] = useState([]);
   const [rotationStrategy, setRotationStrategy] = useState("none");
   const proxyDropdownRef = useRef(null);
+  const proxyBtnRef = useRef(null);
+  const [proxyDropdownStyle, setProxyDropdownStyle] = useState(null);
 
   // Initialize proxy state from connection
   useEffect(() => {
@@ -30,35 +34,35 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   }, [connection]);
 
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
+  // Saved single-pool binding (legacy single-select) falls back to first of the
+  // fork's multi-selection so render reflects whatever is persisted.
+  const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || selectedProxyIds[0] || null;
+  const boundProxyPool = boundProxyPoolId ? proxyPoolMap.get(boundProxyPoolId) : null;
   
   // Display logic - support both new (multi-proxy) and legacy (single proxy) formats
   const hasLegacyProxy = connection.providerSpecificData?.connectionProxyEnabled === true && !!connection.providerSpecificData?.connectionProxyUrl;
-  const hasAnyProxy = selectedProxyIds.length > 0 || hasLegacyProxy;
-  
-  const getProxyDisplayText = () => {
-    if (selectedProxyIds.length === 0 && !hasLegacyProxy) return "";
-    
-    if (selectedProxyIds.length === 1) {
-      const pool = proxyPoolMap.get(selectedProxyIds[0]);
-      return pool ? `Pool: ${pool.name}` : `Pool: ${selectedProxyIds[0]} (inactive/missing)`;
+  const hasAnyProxy = !!boundProxyPoolId || hasLegacyProxy;
+  const proxyDisplayText = boundProxyPool
+    ? `Pool: ${boundProxyPool.name}`
+    : boundProxyPoolId
+      ? `Pool: ${boundProxyPoolId} (inactive/missing)`
+      : hasLegacyProxy
+        ? `Legacy: ${connection.providerSpecificData?.connectionProxyUrl}`
+        : "";
+  const autoPingTooltip = (() => {
+    if (!autoPing) return "";
+    const activeModes = [];
+    if (autoPing.reactiveOn) activeModes.push("On reset");
+    if (autoPing.scheduleOn) activeModes.push(`Scheduled (${autoPing.scheduleSummary || "active"})`);
+    if (activeModes.length > 0) {
+      return `Auto-ping active: ${activeModes.join(" + ")}. Click to configure.`;
     }
-    
-    if (selectedProxyIds.length > 1) {
-      const strategyLabel = rotationStrategy === "random" ? "Random" : rotationStrategy === "round-robin" ? "Round Robin" : rotationStrategy === "failover" ? "Failover" : rotationStrategy === "smart" ? "Smart" : "Multiple";
-      return `${selectedProxyIds.length} pools (${strategyLabel})`;
-    }
-    
-    if (hasLegacyProxy) {
-      return `Legacy: ${connection.providerSpecificData?.connectionProxyUrl}`;
-    }
-    
-    return "";
-  };
-  
-  const proxyDisplayText = getProxyDisplayText();
-  const autoPingTooltip = autoPing?.provider === "codex"
-    ? "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota."
-    : "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.";
+    return autoPing.provider === "codex"
+      ? "Auto-starts the next 5h Codex window after reset or on schedule. Click to configure."
+      : autoPing.provider === "antigravity"
+        ? "Auto-starts the next 5h Antigravity window after reset or on schedule. Click to configure."
+        : "Auto-starts a new window on quota reset or fixed schedule. Click to configure.";
+  })();
 
   let maskedProxyUrl = "";
   if (selectedProxyIds.length > 0) {
@@ -96,16 +100,50 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     proxyBadgeVariant = "error";
   }
 
-  // Close dropdown when clicking outside
+  // Render via portal + fixed positioning so ancestor overflow (scrollable
+  // connections list) can't clip the dropdown
+  const toggleProxyDropdown = () => {
+    if (showProxyDropdown) {
+      setShowProxyDropdown(false);
+      return;
+    }
+    const rect = proxyBtnRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setShowProxyDropdown(true);
+      return;
+    }
+    const estimatedHeight = ((proxyPools?.length || 0) + 1) * 34 + 8;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const flipUp = spaceBelow < estimatedHeight && rect.top > spaceBelow;
+    setProxyDropdownStyle({
+      position: "fixed",
+      right: window.innerWidth - rect.right,
+      ...(flipUp
+        ? { bottom: window.innerHeight - rect.top + 4, maxHeight: Math.max(rect.top - 8, 120) }
+        : { top: rect.bottom + 4, maxHeight: Math.max(spaceBelow - 8, 120) }),
+    });
+    setShowProxyDropdown(true);
+  };
+
+  // Close dropdown when clicking outside, scrolling, or resizing
   useEffect(() => {
     if (!showProxyDropdown) return;
-    const handler = (e) => {
-      if (proxyDropdownRef.current && !proxyDropdownRef.current.contains(e.target)) {
-        setShowProxyDropdown(false);
-      }
+    const handleClick = (e) => {
+      if (
+        proxyDropdownRef.current?.contains(e.target) ||
+        proxyBtnRef.current?.contains(e.target)
+      ) return;
+      setShowProxyDropdown(false);
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    const close = () => setShowProxyDropdown(false);
+    document.addEventListener("mousedown", handleClick);
+    window.addEventListener("resize", close);
+    document.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", close, true);
+    };
   }, [showProxyDropdown]);
 
   const handleToggleProxySelection = (poolId) => {
@@ -165,12 +203,13 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   const rowAuthType = connection.authType || (isOAuth ? "oauth" : "apikey");
   const isOAuthConnection = rowAuthType === "oauth";
   const isCookieConnection = rowAuthType === "cookie";
-  const authIcon = isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
-  const authLabel = isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
+  const isLeaseConnection = rowAuthType === "mcode-lease";
+  const authIcon = isLeaseConnection ? "desktop_windows" : isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
+  const authLabel = isLeaseConnection ? "Desktop Lease" : isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
   const displayName = connection.name?.trim()
     || connection.email?.trim()
     || connection.displayName?.trim()
-    || (isOAuthConnection ? "OAuth Account" : isCookieConnection ? "Cookie Account" : "API Key");
+    || (isLeaseConnection ? "Desktop Lease" : isOAuthConnection ? "OAuth Account" : isCookieConnection ? "Cookie Account" : "API Key");
   const secondaryDisplayName = connection.name?.trim() && connection.email?.trim() && connection.name.trim() !== connection.email.trim()
     ? connection.email.trim()
     : connection.name?.trim() && connection.displayName?.trim() && connection.name.trim() !== connection.displayName.trim()
@@ -284,19 +323,58 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
           </div>
-           {modelAssignmentOptions && onModelAssignmentChange && (
-             <select
-               value={connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel || ""}
-              onChange={(e) => onModelAssignmentChange(e.target.value)}
-              disabled={!strictModelAssignment}
-               className="mt-2 max-w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-text-main"
-               title="Model assignment"
-             >
-               <option value="">Unassigned</option>
-               {modelAssignmentOptions.map((model) => (
-                <option key={model.id} value={model.id}>{model.name || model.id}</option>
-              ))}
-            </select>
+          {modelAssignmentOptions && onModelAssignmentChange && (
+            <div className="mt-2.5">
+              <div
+                className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 transition-all sm:w-auto sm:min-w-[280px] sm:max-w-md ${
+                  !strictModelAssignment
+                    ? "border-dashed border-border/70 bg-black/[0.02] opacity-60 dark:bg-white/[0.02]"
+                    : (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel)
+                    ? "border-primary/40 bg-primary/[0.04] shadow-xs"
+                    : "border-border bg-surface-2/60 hover:bg-surface-2 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20"
+                }`}
+              >
+                <span
+                  className={`material-symbols-outlined shrink-0 text-[16px] ${
+                    (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel) && strictModelAssignment
+                      ? "text-primary"
+                      : "text-text-muted"
+                  }`}
+                >
+                  psychology
+                </span>
+                <select
+                  value={connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel || ""}
+                  onChange={(e) => onModelAssignmentChange(e.target.value)}
+                  disabled={!strictModelAssignment}
+                  title={
+                    !strictModelAssignment
+                      ? "Aktifkan 'Strict Model Assignment' di atas untuk mengunci model ke akun ini"
+                      : "Model assignment"
+                  }
+                  className={`min-w-0 flex-1 cursor-pointer appearance-none bg-transparent text-xs font-medium focus:outline-none disabled:cursor-not-allowed ${
+                    (connection.providerSpecificData?.assignedModel || connection.providerSpecificData?.freebuffModel) && strictModelAssignment
+                      ? "font-semibold text-primary"
+                      : "text-text-main"
+                  }`}
+                >
+                  <option value="" className="bg-surface text-text-muted">
+                    Unassigned
+                  </option>
+                  <option value={MODEL_ASSIGNMENT_ALL} className="bg-surface text-text-main">
+                    All models
+                  </option>
+                  {modelAssignmentOptions.map((model) => (
+                    <option key={model.id} value={model.id} className="bg-surface text-text-main">
+                      {model.name || model.id}
+                    </option>
+                  ))}
+                </select>
+                <span className="material-symbols-outlined pointer-events-none shrink-0 text-[16px] text-text-muted">
+                  expand_more
+                </span>
+              </div>
+            </div>
           )}
           {hasAnyProxy && (
             <div className="mt-1 flex items-center gap-2 flex-wrap">
@@ -321,9 +399,10 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
         <div className="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
           {/* Proxy button with inline dropdown */}
           {(proxyPools || []).length > 0 && (
-            <div className="relative" ref={proxyDropdownRef}>
+            <div>
               <button
-                onClick={() => setShowProxyDropdown((v) => !v)}
+                ref={proxyBtnRef}
+                onClick={toggleProxyDropdown}
                 className={`flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${hasAnyProxy ? "text-primary" : "text-text-muted hover:text-primary"}`}
                 disabled={updatingProxy}
               >
@@ -332,8 +411,18 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                 </span>
                 <span className="text-[10px] leading-tight">Proxy</span>
               </button>
-              {showProxyDropdown && (
-                <div className="absolute left-0 top-full z-50 mt-1 max-w-[calc(100vw-2rem)] min-w-[280px] rounded-lg border border-border bg-bg shadow-lg sm:left-auto sm:right-0">
+              {showProxyDropdown && createPortal(
+                <div
+                  ref={proxyDropdownRef}
+                  style={proxyDropdownStyle}
+                  className="z-50 max-w-[78vw] min-w-[160px] overflow-y-auto rounded-lg border border-border bg-bg py-1 shadow-lg"
+                >
+                  <button
+                    onClick={() => handleSelectProxy("__none__")}
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId ? "text-primary font-medium" : "text-text-main"}`}
+                  >
+                    None
+                  </button>
                   {/* Rotation Strategy Selector */}
                   <div className="border-b border-border p-3">
                     <label className="block text-xs font-medium text-text-muted mb-2">Rotation Strategy</label>
@@ -374,8 +463,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                         <span>None</span>
                       </div>
                     </button>
-                    
-                    {/* Select All Button (only for rotation strategies) */}
+
                     {rotationStrategy !== "none" && (
                       <button
                         onClick={() => {
@@ -383,7 +471,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                             .filter(pool => pool.isActive === true)
                             .map(pool => pool.id);
                           const allSelected = activePoolIds.length > 0 && activePoolIds.every(id => selectedProxyIds.includes(id));
-                          
+
                           if (allSelected) {
                             setSelectedProxyIds([]);
                           } else {
@@ -403,7 +491,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                         </div>
                       </button>
                     )}
-                    
+
                     {(proxyPools || []).map((pool) => {
                       const isSelected = selectedProxyIds.includes(pool.id);
                       const isActive = pool.isActive === true;
@@ -421,7 +509,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                         >
                           <div className="flex items-center gap-2">
                             <span className="material-symbols-outlined text-[16px]">
-                              {rotationStrategy === "none" 
+                              {rotationStrategy === "none"
                                 ? (isSelected ? "radio_button_checked" : "radio_button_unchecked")
                                 : (isSelected ? "check_box" : "check_box_outline_blank")
                               }
@@ -446,15 +534,16 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                       {updatingProxy ? "Applying..." : "Apply"}
                     </button>
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
           )}
           {autoPing && (
             <Tooltip text={autoPingTooltip}>
               <button
-                onClick={() => autoPing.onToggle(!autoPing.on)}
-                className={`flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPing.on ? "text-primary" : "text-text-muted hover:text-primary"}`}
+                onClick={autoPing.onConfigure}
+                className={`flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPing.isActive ? "text-primary" : "text-text-muted hover:text-primary"}`}
               >
                 <span className="material-symbols-outlined text-[18px]">bolt</span>
                 <span className="text-[10px] leading-tight">Auto-ping</span>
@@ -518,8 +607,11 @@ ConnectionRow.propTypes = {
     error: PropTypes.string,
   }),
   autoPing: PropTypes.shape({
-    on: PropTypes.bool,
-    onToggle: PropTypes.func,
+    isActive: PropTypes.bool,
     provider: PropTypes.string,
+    reactiveOn: PropTypes.bool,
+    scheduleOn: PropTypes.bool,
+    scheduleSummary: PropTypes.string,
+    onConfigure: PropTypes.func,
   }),
 };

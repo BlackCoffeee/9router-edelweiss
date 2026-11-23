@@ -67,3 +67,4 @@ Dashboard opens at `http://localhost:20128/dashboard`.
 
 - Upstream project: [https://github.com/decolua/9router](https://github.com/decolua/9router)
 - Upstream docs: [DOCKER.md](DOCKER.md) • [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Env contract: see [`.env.example`](.env.example) (JWT_SECRET, INITIAL_PASSWORD, DATA_DIR, API_KEY_SECRET, MACHINE_ID_SALT, REQUIRE_API_KEY, proxy vars, etc.)

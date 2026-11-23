@@ -1,4 +1,6 @@
 import { AI_PROVIDERS } from "@/shared/constants/providers";
+import { listTtsVoices } from "@/lib/ttsVoices.js";
+import { getKeyAccessContext, isProviderAllowedForKey, keyAccessDeniedResponse } from "@/sse/services/keyAccess.js";
 
 // Provider → internal voices API. Edge/local-device share the generic endpoint.
 const PROVIDER_API = {
@@ -30,15 +32,29 @@ export async function GET(request) {
       );
     }
 
-    const baseUrl = PROVIDER_API[provider](origin);
-    const url = lang ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}lang=${encodeURIComponent(lang)}` : baseUrl;
-    const res = await fetch(url, { cache: "no-store" });
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      return Response.json(
-        { error: { message: data.error || `Upstream ${res.status}`, type: "server_error" } },
-        { status: res.status, headers: { "Access-Control-Allow-Origin": "*" } },
-      );
+    const keyAccess = await getKeyAccessContext(request);
+    // Voice lists are provider metadata: a restricted key may only query
+    // providers it may call (voice listing alone must not reveal others).
+    if (!(await isProviderAllowedForKey(keyAccess, provider))) {
+      return keyAccessDeniedResponse(keyAccess, `${provider} voices`);
+    }
+
+    let data;
+    if (provider === "edge-tts" || provider === "local-device") {
+      // The public route has API-key auth; a server self-fetch cannot use that
+      // key to enter the dashboard-protected API. Reuse its service directly.
+      data = await listTtsVoices(provider, lang);
+    } else {
+      const baseUrl = PROVIDER_API[provider](origin);
+      const url = lang ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}lang=${encodeURIComponent(lang)}` : baseUrl;
+      const res = await fetch(url, { cache: "no-store" });
+      data = await res.json();
+      if (!res.ok || data.error) {
+        return Response.json(
+          { error: { message: data.error || `Upstream ${res.status}`, type: "server_error" } },
+          { status: res.status, headers: { "Access-Control-Allow-Origin": "*" } },
+        );
+      }
     }
 
     // Internal API shape: { voices } when lang filter, else { byLang, languages }
