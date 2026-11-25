@@ -486,6 +486,12 @@ export default function ProviderDetailPage() {
     saveProviderStrategy(strategy, sticky);
   };
 
+  const handleSoonestResetToggle = (enabled) => {
+    const strategy = enabled ? "soonest-reset" : null;
+    setProviderStrategy(strategy);
+    saveProviderStrategy(strategy, providerStickyLimit);
+  };
+
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
     saveProviderStrategy("round-robin", value);
@@ -1745,6 +1751,14 @@ export default function ProviderDetailPage() {
                     />
                   </div>
                 )}
+              </div>
+              {/* Soonest-reset toggle: drain the account whose quota resets first */}
+              <div className="flex flex-wrap items-center gap-2" title="Use the account whose quota window resets soonest first; exhausted accounts go last">
+                <span className="text-xs text-text-muted font-medium">Soonest reset</span>
+                <Toggle
+                  checked={providerStrategy === "soonest-reset"}
+                  onChange={handleSoonestResetToggle}
+                />
               </div>
               <div className="flex flex-wrap items-center gap-2 border-t border-black/[0.03] pt-2 dark:border-white/[0.03]">
                 <div>
