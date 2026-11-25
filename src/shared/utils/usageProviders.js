@@ -30,6 +30,7 @@ export function buildUsageProviderList({
   connections = [],
   freeProviders = {},
   nodeNameMap = {},
+  nodeApiTypeMap = {},
   isLLMProvider = () => true,
   isHiddenProvider = () => false,
 } = {}) {
@@ -46,6 +47,8 @@ export function buildUsageProviderList({
     .map((c) => ({
       ...c,
       nodeName: nodeNameMap[c.provider] || null,
+      // Topology icons for openai/anthropic-compatible nodes need apiType (chat vs responses).
+      apiType: nodeApiTypeMap[c.provider] || c.providerSpecificData?.apiType || null,
     }));
 
   const noAuthProviders = Object.values(freeProviders)

@@ -249,15 +249,18 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       fetch("/api/provider-nodes").then((r) => r.ok ? r.json() : null),
     ])
       .then(([d, nodesData]) => {
-        // Build node name lookup for custom providers
+        // Build node lookups for custom/compatible providers (name + apiType for topology icons).
         const nodeNameMap = {};
+        const nodeApiTypeMap = {};
         for (const node of (nodesData?.nodes || [])) {
           nodeNameMap[node.id] = node.name;
+          if (node.apiType) nodeApiTypeMap[node.id] = node.apiType;
         }
         setProviders(buildUsageProviderList({
           connections: d?.connections || [],
           freeProviders: FREE_PROVIDERS,
           nodeNameMap,
+          nodeApiTypeMap,
           isLLMProvider: (id) => isLLMUsageProvider(id, AI_PROVIDERS, nodeNameMap),
           // Upstream dcc6a205: hidden providers must not appear in Usage even
           // when a connection exists (Providers page filters them out).
