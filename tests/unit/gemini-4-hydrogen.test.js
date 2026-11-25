@@ -160,7 +160,12 @@ describe("Gemini 4 Hydrogen Antigravity tiers", () => {
   });
 
   it("does not reroute standalone -xhigh ids on other providers", () => {
-    expect(getModelUpstreamId("ws", "gpt-5.4", { reasoning_effort: "xhigh" })).toBe("gpt-5.4");
+    // Windsurf registers gpt-5.4-xhigh without an "(xhigh)" upstream preset, so the
+    // promoted tier is skipped and the request collapses to the ordinary -high slot
+    // (or stays on the bare id when that slot is absent). Never pick the standalone -xhigh id.
+    const id = getModelUpstreamId("ws", "gpt-5.4", { reasoning_effort: "xhigh" });
+    expect(id).not.toMatch(/(^|-)xhigh(\(|$)/);
+    expect(id === "gpt-5.4" || id === "gpt-5.4-high" || id.startsWith("gpt-5.4-high")).toBe(true);
   });
 
   it("does not pick up a tier on the Gemini API provider", () => {
