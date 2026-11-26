@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
+const { register } = require("node:module");
 
 const origCreate = http.createServer.bind(http);
 
@@ -13,11 +14,27 @@ const origCreate = http.createServer.bind(http);
 const PEER_TOKEN = crypto.randomBytes(24).toString("hex");
 process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
 
+// The dashboard shares this port with the proxy API, and `next start` listens on
+// every interface when no host is given. Bind loopback unless HOSTNAME says
+// otherwise: the Dockerfile sets 0.0.0.0 for the container's own interface, and
+// docker-compose.yml publishes only 127.0.0.1. (The standalone server reads
+// HOSTNAME itself; only `next start` needs the flag passed below.)
+const LISTEN_HOST = process.env.HOSTNAME || "127.0.0.1";
+
 let backgroundRefreshStarted = false;
 
 function startBackgroundTokenRefreshFromCustomServer() {
   if (backgroundRefreshStarted) return;
   backgroundRefreshStarted = true;
+  // src/ modules import through the jsconfig aliases (@/..., open-sse/...), which
+  // webpack resolved at build time but Node cannot. Register the matching resolve
+  // hooks before the first on-disk import. Fail-open: without them the import
+  // rejects and the app bootstrap still starts the same scheduler.
+  try {
+    register(pathToFileURL(path.join(__dirname, "custom-server-hooks.mjs")).href);
+  } catch (e) {
+    console.error("[BackgroundTokenRefresh] alias hooks failed:", e && e.message ? e.message : e);
+  }
   // Prefer source path (repo / standalone that still has src). Fail-open if missing
   // — initializeApp also starts the same scheduler when the Next app boots.
   const modPath = path.join(__dirname, "src", "sse", "services", "backgroundTokenRefresh.js");
@@ -134,6 +151,11 @@ if (require.main === module) {
     // server in-process, so the wrapper above still sanitizes every request.
     const nextBin = require.resolve("next/dist/bin/next");
     process.argv = [process.argv[0], nextBin, "start", ...process.argv.slice(2)];
+    // `next start` ignores HOSTNAME, so pass the resolved host explicitly unless the
+    // caller already chose one.
+    if (!process.argv.some((a) => a === "--hostname" || a === "-H" || a.startsWith("--hostname="))) {
+      process.argv.push("--hostname", LISTEN_HOST);
+    }
     require(nextBin);
   }
 }

@@ -33,6 +33,24 @@ RUN --mount=type=cache,target=/root/.npm \
     --fetch-retry-maxtimeout=120000 \
     --fetch-timeout=300000
 
+# Runtime dependency tree for modules loaded from disk (custom-server's
+# background token refresh, MITM, lazy services). Next tracing only follows the
+# webpack graph, so packages used solely by on-disk src/open-sse modules (uuid,
+# jose, undici, bcryptjs, node-saml, ...) are missing from the standalone output
+# and the runner would fail with "Cannot find package 'uuid'". This pruned copy
+# is cached and only rebuilt when the lockfile changes.
+RUN --mount=type=cache,target=/root/.npm \
+  mkdir -p /opt/prod-node_modules && \
+  cp package.json package-lock.json /opt/prod-node_modules/ && \
+  cd /opt/prod-node_modules && \
+  npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    --registry="${NPM_REGISTRY}" \
+    --fetch-retries=5 \
+    --fetch-retry-factor=2 \
+    --fetch-retry-mintimeout=10000 \
+    --fetch-retry-maxtimeout=120000 \
+    --fetch-timeout=300000
+
 COPY . ./
 # Guard: undefined identifiers compile fine under webpack/SWC but the shipped
 # bundle ReferenceErrors at runtime ("This page couldn't load"). Fails the
@@ -83,8 +101,18 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/custom-server.js ./custom-server.js
 COPY --from=builder /app/open-sse ./open-sse
-# Next file tracing can omit sibling files; MITM runs server.js as a separate process.
-COPY --from=builder /app/src/mitm ./src/mitm
+# Next file tracing follows webpack bundles, not the on-disk imports of modules the
+# standalone loads by path at runtime (custom-server's background token refresh, the
+# MITM child process, traced services). Ship the full source tree so those relative
+# imports resolve — a partial trace left chains like executors/base.js →
+# services/tokenRefresh/providers.js → src/lib/oauth/kiroExternalIdp.js broken with
+# ERR_MODULE_NOT_FOUND.
+COPY --from=builder /app/src ./src
+# Full production dependency tree, overlaid on the traced subset: on-disk modules
+# (background token refresh → src/lib/db/repos/*.js, MITM, lazy services) import
+# packages Next tracing never saw. Traced files are left intact; only additions
+# land here. See the builder stage for why this is needed.
+COPY --from=builder /opt/prod-node_modules/node_modules ./node_modules
 # Standalone node_modules may omit deps only required by the MITM child process.
 COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
 # Ensure `next` is available at runtime in case tracing did not include it.
@@ -97,6 +125,11 @@ COPY --from=builder /app/node_modules/node-machine-id ./node_modules/node-machin
 # wreq-js + playwright-core (and deps) are lazy-loaded at runtime and omitted by
 # tracing. See https://github.com/decolua/9router/issues/5245
 COPY --from=builder /opt/lazy-runtime/node_modules/. ./node_modules/
+
+# jsconfig maps the bare `open-sse/*` specifier to ./open-sse for webpack; modules
+# loaded from disk at runtime resolve through node_modules instead, so expose it
+# there too (background token refresh imports open-sse/services/tokenRefresh.js).
+RUN ln -s /app/open-sse /app/node_modules/open-sse
 
 RUN mkdir -p /app/data && chown -R node:node /app && \
   mkdir -p /app/data-home && chown node:node /app/data-home && \

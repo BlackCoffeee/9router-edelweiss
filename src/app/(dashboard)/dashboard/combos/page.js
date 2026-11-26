@@ -24,7 +24,6 @@ const CAPACITY_ADAPTER_CAPS = [
   // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
   { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "audio input" },
 ];
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.6-flash-free";
 const EMPTY_CAP_ENTRY = { enabled: true, roundRobin: false, models: [] };
 const EMPTY_CAPACITY_ADAPTER = {
   vision: { ...EMPTY_CAP_ENTRY },
@@ -32,7 +31,7 @@ const EMPTY_CAPACITY_ADAPTER = {
   audioInput: { ...EMPTY_CAP_ENTRY },
   videoInput: { ...EMPTY_CAP_ENTRY },
 };
-const upgradeLegacyModel = (m) => (m === "oc/mimo-v2.5-free" ? DEFAULT_FALLBACK_MODEL : m);
+const upgradeLegacyModel = (m) => (m === "oc/mimo-v2.5-free" ? "oc/mimo-v2.6-flash-free" : m);
 
 // Backward-compat: legacy stored form was an array of {model, enabled}.
 function normalizeCapEntry(entry) {
@@ -66,6 +65,17 @@ function getPolicyBadgeLabel(strategy = {}) {
     return `Custom (≥${pct || 80}%)`;
   }
   return "Smart (≥80%)";
+}
+
+// A combo strategy entry is worth persisting when it holds anything beyond the
+// global defaults: a non-default strategy, a vision delegate, a router/judge
+// pin, or a smart-policy override. `fallbackStrategy: "fallback"` is the default
+// and is never the only reason to keep an entry.
+function holdsComboConfig(entry = {}) {
+  return Object.entries(entry).some(([key, value]) => {
+    if (key === "fallbackStrategy") return !!value && value !== "fallback";
+    return value !== "" && value !== null && value !== undefined && value !== false;
+  });
 }
 
 export default function CombosPage() {
@@ -247,12 +257,22 @@ export default function CombosPage() {
 
   const handleUpdate = async (id, data) => {
     try {
+      const previousName = combos.find((c) => c.id === id)?.name;
       const res = await fetch(`/api/combos/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       if (res.ok) {
+        // Strategy entries are keyed by combo name (strategy, judge, vision reader).
+        // Renaming would orphan them, so move the entry before refetching.
+        const nextName = data?.name;
+        if (previousName && nextName && nextName !== previousName && comboStrategies[previousName]) {
+          const updated = { ...comboStrategies };
+          updated[nextName] = updated[previousName];
+          delete updated[previousName];
+          await persistComboStrategies(updated);
+        }
         await fetchData();
         setEditingCombo(null);
       } else {
@@ -338,18 +358,17 @@ export default function CombosPage() {
     });
   };
 
-  // Merge a per-combo strategy patch into settings.comboStrategies. Passing an empty
-  // patch (strategy back to default "fallback") drops the entry entirely.
+  // Merge a per-combo strategy patch into settings.comboStrategies. A combo entry is
+  // dropped only when it holds nothing beyond the global default (no strategy, no
+  // vision delegate, no router/judge/policy extras).
   const handleSetComboStrategy = async (comboName, patch) => {
     try {
       const updated = { ...comboStrategies };
       const next = { ...(updated[comboName] || {}), ...patch };
-      // Prune to keep settings clean: default fallback with no extras = no entry.
-      if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") {
-        delete updated[comboName];
-      } else {
-        updated[comboName] = next;
-      }
+      // Prune the strategy when it is the default; keep anything else the combo carries.
+      if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") delete next.fallbackStrategy;
+      if (holdsComboConfig(next)) updated[comboName] = next;
+      else delete updated[comboName];
 
       await persistComboStrategies(updated);
     } catch (error) {
@@ -363,13 +382,15 @@ export default function CombosPage() {
     try {
       const updated = { ...comboStrategies };
       for (const combo of selectedCombos) {
+        const next = { ...(updated[combo.name] || {}) };
         if (!strategy || strategy === "fallback") {
-          delete updated[combo.name];
+          delete next.fallbackStrategy;
+          // The bulk action only touches the strategy; a pinned vision delegate,
+          // router, judge, or policy must survive it.
+          if (holdsComboConfig(next)) updated[combo.name] = next;
+          else delete updated[combo.name];
         } else {
-          updated[combo.name] = {
-            ...(updated[combo.name] || {}),
-            fallbackStrategy: strategy,
-          };
+          updated[combo.name] = { ...next, fallbackStrategy: strategy };
         }
       }
       await persistComboStrategies(updated);
@@ -404,6 +425,9 @@ export default function CombosPage() {
             <li><span className="font-medium text-text-main">Smart Router</span> — queries a System One decision model to pick the optimal model before generation; supports Smart Switch (adaptive hysteresis), Strict Lock (1 task = 1 session, +0ms latency), and Per-Turn modes to maximize prompt-cache retention</li>
             <li><span className="font-medium text-text-main">Fusion</span> — queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)</li>
           </ul>
+          <p className="text-sm text-text-muted mt-2">
+            <span className="font-medium text-text-main">Vision</span> — pin an image reader per combo. When none of its members can read the image in a request, the combo tries that model first; with nothing pinned it falls back to the global Vision Adapter pool.
+          </p>
           <p className="hidden text-xs text-text-muted mt-3 max-w-2xl">
             <span className="font-medium text-text-main">Cursor / Claude Default</span> create combos named exactly like those clients&apos; model IDs (e.g. <code className="font-mono">composer-2.5</code>, <code className="font-mono">opus</code>), seeded with the matching <code className="font-mono">cu/…</code> or <code className="font-mono">cc/…</code> route so traffic can hit 9router without the prefix.
             {" "}Note: Cursor IDE itself often blocks built-in Composer / Grok from Override OpenAI Base URL (&quot;model does not support custom API&quot;); add them via Cursor&apos;s <span className="font-medium text-text-main">Add Custom Model</span> using the combo name, or pick a model Cursor allows through the custom endpoint.
@@ -660,10 +684,12 @@ function getRouterModelStatus(routerModel, activeProviders) {
 function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], copied, onCopy, onEdit, onDelete, strategy = {}, onSetStrategy, selected = false, onToggleSelect }) {
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
   const [showRouterSelect, setShowRouterSelect] = useState(false);
+  const [showVisionSelect, setShowVisionSelect] = useState(false);
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const current = strategy.fallbackStrategy || "fallback";
   const judge = strategy.judgeModel || "";
   const routerModel = strategy.routerModel || "";
+  const visionModel = strategy.visionModel || "";
   const isFusion = current === "fusion";
   const isSmart = current === "smart";
   // The synced catalog is server-only, so resolving here would fall back to the
@@ -716,6 +742,33 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                 <span>max {fmtK(comboCaps.maxOutput)}</span>
               </div>
             )}
+            {/* Vision: which model reads images when no member can. Same idea as the
+                global Vision Adapter, pinned per combo. */}
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-medium text-text-muted">Vision</span>
+              <button
+                onClick={() => setShowVisionSelect(true)}
+                className="inline-flex max-w-full items-center gap-1 rounded border border-dashed border-primary/40 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:border-primary hover:bg-primary/5 transition-colors"
+                title="Pick the model that reads images for this combo when none of its members can"
+              >
+                <span className="material-symbols-outlined text-[13px]">visibility</span>
+                <span className="truncate">
+                  {visionModel || (comboCaps?.vision ? "Native" : "Auto — global Vision Adapter")}
+                </span>
+              </button>
+              {visionModel ? (
+                <button
+                  onClick={() => onSetStrategy({ visionModel: "" })}
+                  className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                  title="Reset vision model to Auto"
+                >
+                  <span className="material-symbols-outlined text-[13px]">close</span>
+                </button>
+              ) : null}
+              {visionModel && !comboCaps?.vision ? (
+                <Badge variant="success" size="sm" dot>adapter</Badge>
+              ) : null}
+            </div>
             {/* Fusion: judge picker (Auto = first model) */}
             {isFusion && (
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
@@ -847,6 +900,20 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
         />
       )}
 
+      {/* Vision model picker (single-select; only vision-capable models listed) */}
+      {showVisionSelect && (
+        <ModelSelectModal
+          isOpen={showVisionSelect}
+          onClose={() => setShowVisionSelect(false)}
+          onSelect={(m) => { onSetStrategy({ visionModel: m?.value || "" }); setShowVisionSelect(false); }}
+          activeProviders={activeProviders}
+          title="Select Vision Model"
+          capFilter="vision"
+          addedModelValues={visionModel ? [visionModel] : []}
+          closeOnSelect={true}
+        />
+      )}
+
       {/* System One Router model picker (single-select from systemone kind) */}
       {showRouterSelect && (
         <ModelSelectModal
@@ -917,13 +984,11 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
 
   const handleDeselect = (model) => {
     const value = model?.value || model?.name || model;
-    const next = models.filter((m) => m !== value);
-    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+    patch({ models: models.filter((m) => m !== value) });
   };
 
   const handleRemove = (index) => {
-    const next = models.filter((_, i) => i !== index);
-    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+    patch({ models: models.filter((_, i) => i !== index) });
   };
 
   const handleMove = (index, delta) => {
@@ -982,7 +1047,7 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
       {/* Model pool list/table */}
       {models.length === 0 ? (
         <div className="mt-3 py-2 text-center text-xs text-text-muted italic">
-          No models in pool (will fallback to {DEFAULT_FALLBACK_MODEL})
+          No models in pool — the global adapter stays inactive until you add one.
         </div>
       ) : (
         <div className="mt-3 overflow-hidden rounded-lg border border-border/50">
@@ -1005,11 +1070,6 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="truncate">{model}</span>
                       <CapacityBadges caps={getCaps?.(model)} />
-                      {model === DEFAULT_FALLBACK_MODEL && (
-                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                          free default
-                        </span>
-                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2 text-center">

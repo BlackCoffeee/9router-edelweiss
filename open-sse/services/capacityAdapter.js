@@ -9,11 +9,12 @@
  * never overrides a combo that already has a member covering the capability.
  */
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { routeModelRejectsMedia } from "./mediaLaneSupport.js";
 
 export const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
 const HARD_CAPS = new Set(CAPABILITY_KEYS);
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.6-flash-free";
-const upgradeLegacyModel = (m) => (m === "oc/mimo-v2.5-free" ? DEFAULT_FALLBACK_MODEL : m);
+// Retired free-tier id: only rewrites a pool entry the user explicitly saved.
+const upgradeLegacyModel = (m) => (m === "oc/mimo-v2.5-free" ? "oc/mimo-v2.6-flash-free" : m);
 
 // Normalize a capability entry to { enabled, roundRobin, models }. Backward-compat:
 // accept the legacy array form [{model, enabled}] (treated as enabled, fallback).
@@ -31,14 +32,11 @@ function normalizeCapEntry(entry) {
   return { enabled: false, roundRobin: false, models: [] };
 }
 
-// Resolve one capability's full config. Enabled pools with no models fall back
-// to DEFAULT_FALLBACK_MODEL so the toggle is never a no-op.
+// Resolve one capability's full config. An enabled pool with no models adds
+// nothing: the adapter is opt-in, and an empty pool must never silently route
+// requests to a model the user did not configure.
 export function getCapacityAdapterConfig(cap, settings) {
-  const entry = normalizeCapEntry(settings?.capacityAdapter?.[cap]);
-  if (entry.enabled && entry.models.length === 0) {
-    return { ...entry, models: [DEFAULT_FALLBACK_MODEL] };
-  }
-  return entry;
+  return normalizeCapEntry(settings?.capacityAdapter?.[cap]);
 }
 
 // Flatten enabled models across all capability pools, in priority order, deduped.
@@ -80,8 +78,40 @@ function modelSatisfies(modelStr, requiredHard) {
   const slash = modelStr.indexOf("/");
   const provider = slash > 0 ? modelStr.slice(0, slash) : "";
   const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
+  // The catalog can claim vision for a model whose gateway still rejects
+  // image parts (nutaraline's `:flex` lane advertises vision:true and answers
+  // 400 vision_not_supported). A learned rejection outranks the catalog: if
+  // this model can't read images through its own route, the combo's pinned
+  // reader must be seated instead.
+  if (requiredHard.includes("vision") && routeModelRejectsMedia(provider, model)) return false;
   const caps = getCapabilitiesForModel(provider, model);
   return requiredHard.every((c) => caps[c] === true);
+}
+
+/** True when this model id reads every requested hard modality. */
+export function satisfiesCapabilities(modelStr, capabilities) {
+  const hard = [...(capabilities || [])].filter((c) => HARD_CAPS.has(c));
+  if (hard.length === 0) return true;
+  return modelSatisfies(modelStr, hard);
+}
+
+/** True when at least one of `models` reads every requested hard modality. */
+export function modelsSatisfyCapabilities(models, capabilities) {
+  return (models || []).some((m) => satisfiesCapabilities(m, capabilities));
+}
+
+/**
+ * Per-combo vision model. A combo may name one model that reads images for it
+ * when none of its own members can — the same delegation the global Vision
+ * Adapter pool does, but scoped to that combo so different combos can use
+ * different readers. Stored as settings.comboStrategies[name].visionModel.
+ * Returns null when unset (fall through to the global pool).
+ */
+export function getComboVisionModel(comboStrategy) {
+  const raw = comboStrategy?.visionModel;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed || null;
 }
 
 // Prepend capacity-adapter models as priority candidates when NONE of the
@@ -90,14 +120,40 @@ function modelSatisfies(modelStr, requiredHard) {
 // original models follow as fallback. Leaves `models` untouched when the
 // original list already covers it (combo.js's reorderByCapabilities handles
 // that case via autoSwitch).
-export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings) {
+//
+// `comboVisionModel` is the per-combo reader (vision only): it is tried before
+// the global pool, so a combo that pins its own vision model never pays a
+// failed round trip on a pool member, and the global pool still backstops it.
+export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings, comboVisionModel = null) {
   const hard = [...(requiredCapabilities || [])].filter((c) => HARD_CAPS.has(c));
   if (hard.length === 0 || !Array.isArray(models) || models.length === 0) return models;
   if (models.some((m) => modelSatisfies(m, hard))) return models;
 
-  const pool = getCapacityAdapterModels(settings).filter((m) => !models.includes(m) && modelSatisfies(m, hard));
-  if (pool.length === 0) return models;
-  return [...pool, ...models];
+  const reusable = (m) => !models.includes(m) && modelSatisfies(m, hard);
+  // The combo's own pick is a vision reader; it must not silently become the
+  // pdf/audio adapter, so it only joins a request that actually needs vision.
+  const priority = comboVisionModel && hard.includes("vision") && reusable(comboVisionModel)
+    ? [comboVisionModel]
+    : [];
+
+  const pool = getCapacityAdapterModels(settings).filter(reusable);
+  const merged = [...new Set([...priority, ...pool])];
+  if (merged.length === 0) return models;
+  return [...merged, ...models];
+}
+
+/**
+ * Fusion panels fan out to every member, and members that cannot read the
+ * request's hard modalities get the media stripped — so an image request whose
+ * panel has no reader would be judged on placeholders. Append the combo's own
+ * vision model when it is reachable and the panel needs it. The global adapter
+ * pool is deliberately not pulled in: it would silently grow every fusion panel.
+ */
+export function fusionPanelModels(comboModels, requiredCapabilities, comboVisionModel, reachableModels) {
+  const picksItsReader = comboVisionModel
+    && (reachableModels || []).includes(comboVisionModel)
+    && !modelsSatisfyCapabilities(comboModels, requiredCapabilities);
+  return picksItsReader ? [...comboModels, comboVisionModel] : comboModels;
 }
 
 const CHARS_PER_TOKEN = 4; // rough estimate; avoids pulling in a tokenizer dependency
