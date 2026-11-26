@@ -1,14 +1,14 @@
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
-import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX, ANTIGRAVITY_PROMPT_REWRITES } from "../config/appConstants.js";
+import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX, ANTIGRAVITY_PROMPT_REWRITES, ANTIGRAVITY_DEFAULT_SYSTEM } from "../config/appConstants.js";
+import { GEMINI_ROLE } from "../translator/schema/roles.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { resolveSessionId, toNumericSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { cleanJSONSchemaForAntigravity, normalizeGeminiContents } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
-import { GEMINI_ROLE } from "../translator/schema/index.js";
 import { GEMINI_LONG_DECODE_MAX_OUTPUT, supportsGeminiLongDecode, wantsGeminiLongDecode, withGeminiLongDecode } from "../utils/geminiLongDecode.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
@@ -241,11 +241,15 @@ export class AntigravityExecutor extends BaseExecutor {
   // sessionId comes from transformRequest output; base.execute runs transformRequest before
   // buildHeaders, so we read it from instance state cached there (fallback: explicit arg).
   buildHeaders(credentials, stream = true, sessionId = null) {
-    return {
+    const headers = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${credentials.accessToken}`,
       "User-Agent": this.config.headers?.["User-Agent"] || ANTIGRAVITY_HEADERS["User-Agent"],
     };
+    // This override returns early, so it must re-add what BaseExecutor.buildHeaders adds:
+    // every streaming Antigravity call used to go out without Accept: text/event-stream.
+    if (stream) headers["Accept"] = "text/event-stream";
+    return headers;
   }
 
   transformRequest(model, body, stream, credentials) {
@@ -398,6 +402,18 @@ export class AntigravityExecutor extends BaseExecutor {
       requestWithoutTools.systemInstruction = {
         ...requestWithoutTools.systemInstruction,
         parts: rewrittenParts,
+      };
+    }
+
+    // The real client always opens the system prompt with the Antigravity identity.
+    const systemParts = requestWithoutTools.systemInstruction?.parts;
+    const hasAgIdentity = (systemParts || []).some(
+      (part) => typeof part.text === "string" && part.text.includes("You are Antigravity")
+    );
+    if (!hasAgIdentity) {
+      requestWithoutTools.systemInstruction = {
+        ...(requestWithoutTools.systemInstruction || { role: GEMINI_ROLE.USER }),
+        parts: [{ text: ANTIGRAVITY_DEFAULT_SYSTEM }, ...(systemParts || [])]
       };
     }
 

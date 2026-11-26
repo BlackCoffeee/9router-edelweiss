@@ -44,6 +44,9 @@ describe("Antigravity strips Hermes lines that trigger a fake 429", () => {
 
   it("still rewrites the plain Hermes identity sentence", () => {
     const text = systemTextSentToAntigravity("You are Hermes Agent, built by Nous Research.");
-    expect(text).toBe("You are an AI assistant.");
+    // DEFAULT_SYSTEM is prepended ahead of every generation request.
+    expect(text).toContain("You are an AI assistant.");
+    expect(text).not.toContain("You are Hermes Agent");
+    expect(text).not.toContain("Nous Research");
   });
 });

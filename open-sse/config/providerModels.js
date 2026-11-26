@@ -1,7 +1,7 @@
 import REGISTRY from "../providers/registry/index.js";
 // PROVIDER_MODELS now built from providers/registry (transport + models co-located)
 import { PROVIDER_MODELS } from "../providers/index.js";
-import { modelQuotaFamily, modelStrip, modelTargetFormat, modelSupportedFormats, normalizeModelId } from "../providers/models/schema.js";
+import { modelQuotaFamily, modelStrip, modelTargetFormat, modelSupportedFormats, modelParams, normalizeModelId } from "../providers/models/schema.js";
 import { CODEX_REVIEW_SUFFIX, isMuseSparkModel, opencodeFamilyFormats } from "../providers/models/helpers.js";
 import { FORMATS } from "../translator/formats.js";
 export { PROVIDER_MODELS };
@@ -92,12 +92,18 @@ export function getModelMeta(aliasOrId, modelId) {
   return findModel(PROVIDER_MODELS[aliasOrId], modelId, aliasOrId) || null;
 }
 
+// Extra request params a model declares (registry `params`), e.g. ["input_type"].
+// Empty array when the model declares none — callers treat that as "no extra params".
+export function getModelParams(aliasOrId, modelId) {
+  return modelParams(findModel(PROVIDER_MODELS[aliasOrId], modelId, aliasOrId));
+}
+
 // Requested level → tier suffixes to try, most specific first; the last one is the
-// collapsed tier every tiered family has. A promoted tier (xhigh) is only honored on
+// collapsed tier every tiered family has. A promoted tier (xhigh/max) is only honored on
 // a tier-preset entry whose upstreamModelId carries the same "(level)" — e.g. ag
 // gemini-4-hydrogen-xhigh — so standalone ids such as ws/gpt-5.4-xhigh never get
 // picked up by a reasoning_effort sent for gpt-5.4.
-const TIER_FALLBACKS = { xhigh: ["xhigh", "high"], max: ["xhigh", "high"], minimal: ["low"] };
+const TIER_FALLBACKS = { xhigh: ["xhigh", "high"], max: ["max", "xhigh", "high"], minimal: ["low"] };
 
 function findTierEntry(models, baseId, level, aliasOrId) {
   const tiers = TIER_FALLBACKS[level] || [level];
